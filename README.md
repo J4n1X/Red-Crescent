@@ -1,4 +1,4 @@
-# lua-html-renderer
+# Red Crescent
 
 A Rust-powered web server that renders dynamic HTML using embedded Lua scripts. Think PHP, but with Lua and Rust!
 It's intended purpose is to be used behind another webserver such as Nginx or Apache2.
