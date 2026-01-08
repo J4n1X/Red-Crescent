@@ -1,0 +1,366 @@
+<?lua
+    -- Gather Lua environment information
+    lua_version = _VERSION or "Unknown"
+    
+    -- Get memory usage
+    collectgarbage("collect")
+    memory_kb = collectgarbage("count")
+    
+    -- Get OS info
+    os_time = os.time()
+    os_date = os.date("%Y-%m-%d %H:%M:%S")
+?>
+<html>
+<head>
+    <title>Lua Info</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            background: linear-gradient(135deg, #000080, #4169E1);
+            color: white;
+            padding: 20px;
+            margin: 0 0 20px 0;
+            border-radius: 8px;
+            text-align: center;
+        }
+        h2 {
+            background: #000080;
+            color: white;
+            padding: 10px 15px;
+            margin: 20px 0 0 0;
+            border-radius: 8px 8px 0 0;
+            font-size: 1.1em;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        th, td {
+            padding: 10px 15px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background: #e0e0ff;
+            font-weight: 600;
+            width: 30%;
+        }
+        td {
+            font-family: monospace;
+            word-break: break-all;
+        }
+        tr:hover {
+            background: #f8f8ff;
+        }
+        .header-row {
+            background: #4169E1;
+            color: white;
+        }
+        .header-row th {
+            background: transparent;
+            color: white;
+        }
+        .center {
+            text-align: center;
+        }
+        .logo {
+            font-size: 4em;
+            margin-bottom: 10px;
+        }
+        code {
+            background: #f0f0f0;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <h1>
+        Lua Info
+    </h1>
+
+    <h2>General Information</h2>
+    <table>
+        <tr>
+            <th>Lua Version</th>
+            <td><?lua return lua_version ?></td>
+        </tr>
+        <tr>
+            <th>Current Date/Time</th>
+            <td><?lua return os_date ?></td>
+        </tr>
+        <tr>
+            <th>Unix Timestamp</th>
+            <td><?lua return os_time ?></td>
+        </tr>
+        <tr>
+            <th>Memory Usage</th>
+            <td><?lua return string.format("%.2f KB", memory_kb) ?></td>
+        </tr>
+        <tr>
+            <th>Architecture</th>
+            <td><?lua 
+                -- Try to detect architecture from package config
+                local sep = package.config:sub(1,1)
+                if sep == "\\" then
+                    return "Windows"
+                else
+                    return "Unix-like (Linux/macOS)"
+                end
+            ?></td>
+        </tr>
+    </table>
+
+    <h2>Package Configuration</h2>
+    <table>
+        <tr>
+            <th>Directory Separator</th>
+            <td><code><?lua return package.config:sub(1,1) ?></code></td>
+        </tr>
+        <tr>
+            <th>Path Separator</th>
+            <td><code><?lua return package.config:sub(3,3) ?></code></td>
+        </tr>
+        <tr>
+            <th>Template Marker</th>
+            <td><code><?lua return package.config:sub(5,5) ?></code></td>
+        </tr>
+        <tr>
+            <th>Executable Dir Marker</th>
+            <td><code><?lua return package.config:sub(7,7) ?></code></td>
+        </tr>
+        <tr>
+            <th>Ignore Marker</th>
+            <td><code><?lua return package.config:sub(9,9) ?></code></td>
+        </tr>
+    </table>
+
+    <h2>Package Search Paths (package.path)</h2>
+    <table>
+        <?lua
+            local rows = ""
+            local i = 1
+            for path in string.gmatch(package.path, "[^;]+") do
+                rows = rows .. "<tr><th>" .. i .. "</th><td>" .. path .. "</td></tr>"
+                i = i + 1
+            end
+            return rows
+        ?>
+    </table>
+
+    <h2>C Library Search Paths (package.cpath)</h2>
+    <table>
+        <?lua
+            local rows = ""
+            local i = 1
+            for path in string.gmatch(package.cpath, "[^;]+") do
+                rows = rows .. "<tr><th>" .. i .. "</th><td>" .. path .. "</td></tr>"
+                i = i + 1
+            end
+            return rows
+        ?>
+    </table>
+
+    <h2>Loaded Modules (package.loaded)</h2>
+    <table>
+        <tr class="header-row">
+            <th>Module Name</th>
+            <th>Type</th>
+        </tr>
+        <?lua
+            local rows = ""
+            local modules = {}
+            for name, mod in pairs(package.loaded) do
+                table.insert(modules, {name = name, mod = mod})
+            end
+            table.sort(modules, function(a, b) return a.name < b.name end)
+            for _, m in ipairs(modules) do
+                rows = rows .. "<tr><th>" .. m.name .. "</th><td>" .. type(m.mod) .. "</td></tr>"
+            end
+            return rows
+        ?>
+    </table>
+
+    <h2>Global Variables &amp; Functions</h2>
+    <table>
+        <tr class="header-row">
+            <th>Name</th>
+            <th>Type</th>
+        </tr>
+        <?lua
+            local rows = ""
+            local globals = {}
+            for name, val in pairs(_G) do
+                table.insert(globals, {name = name, val = val})
+            end
+            table.sort(globals, function(a, b) return a.name < b.name end)
+            for _, g in ipairs(globals) do
+                local t = type(g.val)
+                rows = rows .. "<tr><th>" .. tostring(g.name) .. "</th><td>" .. t .. "</td></tr>"
+            end
+            return rows
+        ?>
+    </table>
+
+    <h2>Standard Libraries</h2>
+    <table>
+        <tr class="header-row">
+            <th>Library</th>
+            <th>Status</th>
+        </tr>
+        <?lua
+            local libs = {
+                {"string", string},
+                {"table", table},
+                {"math", math},
+                {"io", io},
+                {"os", os},
+                {"debug", debug},
+                {"coroutine", coroutine},
+                {"utf8", utf8},
+                {"package", package}
+            }
+            local rows = ""
+            for _, lib in ipairs(libs) do
+                local status = lib[2] and "Yes" or "No"
+                rows = rows .. "<tr><th>" .. lib[1] .. "</th><td>" .. status .. "</td></tr>"
+            end
+            return rows
+        ?>
+    </table>
+
+    <h2>Math Library Constants</h2>
+    <table>
+        <tr>
+            <th>math.pi</th>
+            <td><?lua return math.pi ?></td>
+        </tr>
+        <tr>
+            <th>math.huge</th>
+            <td><?lua return math.huge ?></td>
+        </tr>
+        <tr>
+            <th>math.maxinteger</th>
+            <td><?lua return math.maxinteger or "N/A (Lua 5.2 or earlier)" ?></td>
+        </tr>
+        <tr>
+            <th>math.mininteger</th>
+            <td><?lua return math.mininteger or "N/A (Lua 5.2 or earlier)" ?></td>
+        </tr>
+    </table>
+
+    <h2>String Library Functions</h2>
+    <table>
+        <tr class="header-row">
+            <th>Function</th>
+            <th>Available</th>
+        </tr>
+        <?lua
+            local str_funcs = {"byte", "char", "dump", "find", "format", "gmatch", 
+                              "gsub", "len", "lower", "match", "pack", "packsize", 
+                              "rep", "reverse", "sub", "unpack", "upper"}
+            local rows = ""
+            for _, fn in ipairs(str_funcs) do
+                local status = string[fn] and "Yes" or "No"
+                rows = rows .. "<tr><th>string." .. fn .. "</th><td>" .. status .. "</td></tr>"
+            end
+            return rows
+        ?>
+    </table>
+
+    <h2>Table Library Functions</h2>
+    <table>
+        <tr class="header-row">
+            <th>Function</th>
+            <th>Available</th>
+        </tr>
+        <?lua
+            local tbl_funcs = {"concat", "insert", "move", "pack", "remove", 
+                              "sort", "unpack"}
+            local rows = ""
+            for _, fn in ipairs(tbl_funcs) do
+                local status = table[fn] and "Yes" or "No"
+                rows = rows .. "<tr><th>table." .. fn .. "</th><td>" .. status .. "</td></tr>"
+            end
+            return rows
+        ?>
+    </table>
+
+    <h2>OS Library Functions</h2>
+    <table>
+        <tr class="header-row">
+            <th>Function</th>
+            <th>Available</th>
+        </tr>
+        <?lua
+            local os_funcs = {"clock", "date", "difftime", "execute", "exit", 
+                             "getenv", "remove", "rename", "setlocale", "time", "tmpname"}
+            local rows = ""
+            for _, fn in ipairs(os_funcs) do
+                local status = os[fn] and "Yes" or "No"
+                rows = rows .. "<tr><th>os." .. fn .. "</th><td>" .. status .. "</td></tr>"
+            end
+            return rows
+        ?>
+    </table>
+
+    <h2>Environment Variables</h2>
+    <table>
+        <tr class="header-row">
+            <th>Variable</th>
+            <th>Value</th>
+        </tr>
+        <?lua
+            local env_vars = {"PATH", "HOME", "USER", "SHELL", "LANG", "TERM", 
+                             "PWD", "EDITOR", "DISPLAY", "XDG_SESSION_TYPE",
+                             "HOSTNAME", "LOGNAME", "LD_LIBRARY_PATH"}
+            local rows = ""
+            for _, var in ipairs(env_vars) do
+                local val = os.getenv(var)
+                if val then
+                    -- Escape HTML and truncate long values
+                    val = val:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+                    if #val > 100 then
+                        val = val:sub(1, 100) .. "..."
+                    end
+                    rows = rows .. "<tr><th>" .. var .. "</th><td>" .. val .. "</td></tr>"
+                end
+            end
+            return rows
+        ?>
+    </table>
+
+    <h2>Garbage Collector Information</h2>
+    <table>
+        <tr>
+            <th>Current Memory (KB)</th>
+            <td><?lua return string.format("%.2f", collectgarbage("count")) ?></td>
+        </tr>
+        <tr>
+            <th>GC Step Multiplier</th>
+            <td><?lua 
+                local ok, val = pcall(function() return collectgarbage("setstepmul", 200) end)
+                if ok then 
+                    collectgarbage("setstepmul", val)
+                    return val 
+                else 
+                    return "N/A" 
+                end
+            ?></td>
+        </tr>
+    </table>
+
+    <p style="text-align: center; color: #666; margin-top: 30px;">
+        Generated at <?lua return os.date("%Y-%m-%d %H:%M:%S") ?> | 
+        <?lua return _VERSION ?>
+    </p>
+</body>
+</html>

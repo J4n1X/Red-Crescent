@@ -1,0 +1,15 @@
+[package]
+name = "Red-Crescent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = "4.12.1"
+log = "0.4.29"
+mlua = { version = "0.11.5", features = ["lua54", "send", "serde"] }
+regex = "1.12.2"
+tokio = {version = "1.49.0", features = ["full"] }
+pretty_env_logger = "0.5.0"
+serde_json = "1.0.149"
+anyhow = "1.0.100"
+

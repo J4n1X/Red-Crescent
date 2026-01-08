@@ -1,0 +1,530 @@
+<?lua
+    -- Demo page for lua-html-renderer
+    -- This showcases all the PHP-like capabilities
+    
+    log.info("Demo page loaded!")
+    
+    -- Get visitor name from query params or use default
+    visitor_name = request.query["name"] or "Guest"
+    theme = request.query["theme"] or "light"
+    
+    -- Calculate some fun stats
+    page_load_time = os.date("%Y-%m-%d %H:%M:%S")
+    random_seed = os.time()
+    math.randomseed(random_seed)
+    lucky_number = math.random(1, 100)
+    
+    -- Fun facts database
+    facts = {
+        "Lua means 'Moon' in Portuguese.",
+        "Lua was created in 1993 at PUC-Rio in Brazil.",
+        "Lua is used in many games, including World of Warcraft and Roblox.",
+        "Lua tables are the only data structure, but they can act as arrays, dictionaries, or objects.",
+        "Lua's garbage collector uses an incremental mark-and-sweep algorithm.",
+        "Lua is one of the fastest scripting languages available.",
+        "The Lua runtime is only about 200KB compiled.",
+        "Nginx uses Lua through OpenResty for high-performance web apps.",
+        "Redis supports Lua scripting for complex operations.",
+        "Lua arrays are 1-indexed, not 0-indexed like most languages."
+    }
+    random_fact = facts[math.random(1, #facts)]
+    
+    -- Theme colors
+    themes = {
+        light = {
+            bg = "#f5f5f5",
+            card_bg = "#ffffff",
+            text = "#333333",
+            accent = "#4169E1",
+            accent_light = "#6B8DD6",
+            header_bg = "linear-gradient(135deg, #4169E1, #6B8DD6)"
+        },
+        dark = {
+            bg = "#1a1a2e",
+            card_bg = "#16213e",
+            text = "#eaeaea",
+            accent = "#e94560",
+            accent_light = "#ff6b6b",
+            header_bg = "linear-gradient(135deg, #e94560, #ff6b6b)"
+        },
+        ocean = {
+            bg = "#0a1628",
+            card_bg = "#112240",
+            text = "#ccd6f6",
+            accent = "#64ffda",
+            accent_light = "#64ffda",
+            header_bg = "linear-gradient(135deg, #0077b6, #00b4d8)"
+        },
+        forest = {
+            bg = "#1b2d1b",
+            card_bg = "#2d4a2d",
+            text = "#d4e6d4",
+            accent = "#7cb342",
+            accent_light = "#9ccc65",
+            header_bg = "linear-gradient(135deg, #2e7d32, #66bb6a)"
+        }
+    }
+    current_theme = themes[theme] or themes.light
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lua HTML Renderer - Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            background: <?lua return current_theme.bg ?>;
+            color: <?lua return current_theme.text ?>;
+            min-height: 100vh;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        header {
+            background: <?lua return current_theme.header_bg ?>;
+            color: white;
+            padding: 40px;
+            border-radius: 16px;
+            margin-bottom: 30px;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+        .card {
+            background: <?lua return current_theme.card_bg ?>;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .card h2 {
+            color: <?lua return current_theme.accent ?>;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid <?lua return current_theme.accent ?>;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .stat-box {
+            background: <?lua return current_theme.card_bg ?>;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            border-left: 4px solid <?lua return current_theme.accent ?>;
+        }
+        .stat-box .number {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: <?lua return current_theme.accent ?>;
+        }
+        .stat-box .label {
+            opacity: 0.8;
+            margin-top: 5px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid rgba(128,128,128,0.3);
+        }
+        th {
+            color: <?lua return current_theme.accent ?>;
+            font-weight: 600;
+        }
+        code {
+            background: rgba(128,128,128,0.2);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: "Fira Code", "Consolas", monospace;
+        }
+        .tag {
+            display: inline-block;
+            background: <?lua return current_theme.accent ?>;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            margin: 2px;
+        }
+        .theme-switcher {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 15px;
+        }
+        .theme-switcher a {
+            color: white;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.2);
+            transition: background 0.3s;
+        }
+        .theme-switcher a:hover {
+            background: rgba(255,255,255,0.3);
+        }
+        .fact-box {
+            background: <?lua return current_theme.header_bg ?>;
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            font-style: italic;
+            position: relative;
+        }
+        .fact-box::before {
+            content: "💡";
+            font-size: 1.5em;
+            margin-right: 10px;
+        }
+        ul {
+            list-style: none;
+            padding: 0;
+        }
+        ul li {
+            padding: 8px 0;
+            padding-left: 20px;
+            position: relative;
+        }
+        ul li::before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: <?lua return current_theme.accent ?>;
+        }
+        .interactive-form {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .interactive-form input {
+            flex: 1;
+            min-width: 200px;
+            padding: 10px 15px;
+            border: 2px solid <?lua return current_theme.accent ?>;
+            border-radius: 8px;
+            background: transparent;
+            color: <?lua return current_theme.text ?>;
+            font-size: 1em;
+        }
+        .interactive-form button {
+            padding: 10px 25px;
+            background: <?lua return current_theme.accent ?>;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: opacity 0.3s;
+        }
+        .interactive-form button:hover {
+            opacity: 0.9;
+        }
+        .fibonacci {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .fibonacci span {
+            background: <?lua return current_theme.accent ?>;
+            color: white;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+        footer {
+            text-align: center;
+            margin-top: 30px;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🌙 Welcome, <?lua return visitor_name ?>!</h1>
+            <p>This is a demo of the Lua HTML Renderer - PHP-like templating with Lua</p>
+            <div class="theme-switcher">
+                <?lua
+                    local links = ""
+                    local theme_names = {"light", "dark", "ocean", "forest"}
+                    for _, t in ipairs(theme_names) do
+                        local name_param = request.query["name"] and ("&name=" .. request.query["name"]) or ""
+                        local active = (t == theme) and " style='background:rgba(0,0,0,0.3)'" or ""
+                        links = links .. '<a href="?theme=' .. t .. name_param .. '"' .. active .. '>' .. t:gsub("^%l", string.upper) .. '</a>'
+                    end
+                    return links
+                ?>
+            </div>
+        </header>
+
+        <!-- Interactive Section -->
+        <div class="card">
+            <h2>👋 Personalize Your Visit</h2>
+            <form class="interactive-form" method="get">
+                <input type="hidden" name="theme" value="<?lua return theme ?>">
+                <input type="text" name="name" placeholder="Enter your name..." value="<?lua return request.query["name"] or "" ?>">
+                <button type="submit">Say Hello!</button>
+            </form>
+        </div>
+
+        <!-- Stats Grid -->
+        <div class="grid">
+            <div class="stat-box">
+                <div class="number"><?lua return lucky_number ?></div>
+                <div class="label">Your Lucky Number</div>
+            </div>
+            <div class="stat-box">
+                <div class="number"><?lua return os.date("%H:%M") ?></div>
+                <div class="label">Current Time</div>
+            </div>
+            <div class="stat-box">
+                <div class="number"><?lua return os.date("%A") ?></div>
+                <div class="label">Day of Week</div>
+            </div>
+            <div class="stat-box">
+                <div class="number"><?lua return _VERSION:match("%d+%.%d+") ?></div>
+                <div class="label">Lua Version</div>
+            </div>
+        </div>
+
+        <!-- Fun Fact -->
+        <div class="card">
+            <h2>🎲 Random Lua Fact</h2>
+            <div class="fact-box">
+                <?lua return random_fact ?>
+            </div>
+            <p style="margin-top: 15px; opacity: 0.7; text-align: center;">
+                <a href="?theme=<?lua return theme ?><?lua return request.query["name"] and ("&name=" .. request.query["name"]) or "" ?>" style="color: <?lua return current_theme.accent ?>;">
+                    🔄 Refresh for another fact
+                </a>
+            </p>
+        </div>
+
+        <!-- Fibonacci Demo -->
+        <div class="card">
+            <h2>🔢 Fibonacci Sequence (Computed in Lua)</h2>
+            <div class="fibonacci">
+                <?lua
+                    local function fib(n)
+                        local a, b = 0, 1
+                        local result = {}
+                        for i = 1, n do
+                            table.insert(result, a)
+                            a, b = b, a + b
+                        end
+                        return result
+                    end
+                    
+                    local sequence = fib(15)
+                    local html = ""
+                    for i, num in ipairs(sequence) do
+                        html = html .. "<span>" .. num .. "</span>"
+                    end
+                    return html
+                ?>
+            </div>
+        </div>
+
+        <!-- Calendar -->
+        <div class="card">
+            <h2>📅 This Month's Calendar</h2>
+            <?lua
+                local today = os.date("*t")
+                local first_day = os.date("*t", os.time({year=today.year, month=today.month, day=1}))
+                local last_day = os.date("*t", os.time({year=today.year, month=today.month+1, day=0})).day
+                
+                local html = '<table style="text-align:center">'
+                html = html .. '<tr style="font-weight:bold">'
+                local days = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
+                for _, d in ipairs(days) do
+                    html = html .. "<th>" .. d .. "</th>"
+                end
+                html = html .. "</tr><tr>"
+                
+                -- Empty cells before first day
+                for i = 1, first_day.wday - 1 do
+                    html = html .. "<td></td>"
+                end
+                
+                -- Days of month
+                for day = 1, last_day do
+                    local weekday = os.date("*t", os.time({year=today.year, month=today.month, day=day})).wday
+                    local is_today = (day == today.day)
+                    local style = is_today and 'style="background:' .. current_theme.accent .. ';color:white;border-radius:50%;font-weight:bold"' or ""
+                    html = html .. "<td " .. style .. ">" .. day .. "</td>"
+                    if weekday == 7 and day < last_day then
+                        html = html .. "</tr><tr>"
+                    end
+                end
+                
+                html = html .. "</tr></table>"
+                return html
+            ?>
+        </div>
+
+        <!-- Query Parameters -->
+        <div class="card">
+            <h2>🔍 Your Request Info</h2>
+            <table>
+                <tr>
+                    <th>Parameter</th>
+                    <th>Value</th>
+                </tr>
+                <?lua
+                    local html = ""
+                    local has_params = false
+                    for key, value in pairs(request.query) do
+                        has_params = true
+                        html = html .. "<tr><td><code>" .. key .. "</code></td><td>" .. value .. "</td></tr>"
+                    end
+                    if not has_params then
+                        html = '<tr><td colspan="2" style="text-align:center;opacity:0.6">No query parameters - try adding ?name=YourName to the URL!</td></tr>'
+                    end
+                    return html
+                ?>
+            </table>
+        </div>
+
+        <!-- Prime Numbers -->
+        <div class="card">
+            <h2>🔢 Prime Numbers Under 100</h2>
+            <div class="fibonacci">
+                <?lua
+                    local function is_prime(n)
+                        if n < 2 then return false end
+                        if n == 2 then return true end
+                        if n % 2 == 0 then return false end
+                        for i = 3, math.sqrt(n), 2 do
+                            if n % i == 0 then return false end
+                        end
+                        return true
+                    end
+                    
+                    local html = ""
+                    for i = 2, 100 do
+                        if is_prime(i) then
+                            html = html .. "<span>" .. i .. "</span>"
+                        end
+                    end
+                    return html
+                ?>
+            </div>
+        </div>
+
+        <!-- Available Features -->
+        <div class="card">
+            <h2>⚡ What You Can Do</h2>
+            <div class="grid">
+                <div>
+                    <h3 style="color: <?lua return current_theme.accent ?>; margin-bottom: 10px;">Lua Features</h3>
+                    <ul>
+                        <li>Variables & Tables</li>
+                        <li>Functions & Closures</li>
+                        <li>Loops & Conditionals</li>
+                        <li>String Manipulation</li>
+                        <li>Math Operations</li>
+                        <li>Date/Time Functions</li>
+                    </ul>
+                </div>
+                <div>
+                    <h3 style="color: <?lua return current_theme.accent ?>; margin-bottom: 10px;">Runtime Features</h3>
+                    <ul>
+                        <li><code>query</code> - URL parameters</li>
+                        <li><code>log.info()</code> - Server logging</li>
+                        <li><code>log.debug()</code> - Debug logging</li>
+                        <li><code>log.warn()</code> - Warning logging</li>
+                        <li><code>log.error()</code> - Error logging</li>
+                        <li><code>return</code> - Output to page</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Info -->
+        <div class="card">
+            <h2>💻 System Information</h2>
+            <table>
+                <tr>
+                    <th>Property</th>
+                    <th>Value</th>
+                </tr>
+                <tr>
+                    <td>Lua Version</td>
+                    <td><?lua return _VERSION ?></td>
+                </tr>
+                <tr>
+                    <td>Page Generated At</td>
+                    <td><?lua return page_load_time ?></td>
+                </tr>
+                <tr>
+                    <td>Unix Timestamp</td>
+                    <td><?lua return os.time() ?></td>
+                </tr>
+                <tr>
+                    <td>Memory Usage</td>
+                    <td><?lua collectgarbage("collect"); return string.format("%.2f KB", collectgarbage("count")) ?></td>
+                </tr>
+                <tr>
+                    <td>Random Seed Used</td>
+                    <td><?lua return random_seed ?></td>
+                </tr>
+                <tr>
+                    <td>Current Theme</td>
+                    <td><span class="tag"><?lua return theme ?></span></td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- Code Example -->
+        <div class="card">
+            <h2>📝 How It Works</h2>
+            <p style="margin-bottom: 15px;">Embed Lua code in your HTML using <code>&lt;?lua ... ?&gt;</code> tags:</p>
+            <pre style="background: rgba(128,128,128,0.2); padding: 15px; border-radius: 8px; overflow-x: auto;"><code>&lt;h1&gt;&lt;?lua return "Hello, " .. visitor_name .. "!" ?&gt;&lt;/h1&gt;
+
+&lt;?lua
+    -- Multi-line Lua blocks work too!
+    local items = {"Apple", "Banana", "Cherry"}
+    local html = "&lt;ul&gt;"
+    for _, item in ipairs(items) do
+        html = html .. "&lt;li&gt;" .. item .. "&lt;/li&gt;"
+    end
+    html = html .. "&lt;/ul&gt;"
+    return html
+?&gt;</code></pre>
+        </div>
+
+        <footer>
+            <p>Built with 🦀 Rust + 🌙 Lua | <?lua return os.date("%Y") ?></p>
+            <p style="margin-top: 5px;">
+                <a href="/index.lhtml" style="color: <?lua return current_theme.accent ?>;">Home</a> •
+                <a href="/info.lhtml" style="color: <?lua return current_theme.accent ?>;">Lua Info</a> •
+                <a href="/demo.lhtml" style="color: <?lua return current_theme.accent ?>;">Demo</a>
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

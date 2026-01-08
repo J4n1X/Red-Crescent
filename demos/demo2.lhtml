@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced Request API Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        header {
+            background: white;
+            color: #667eea;
+            padding: 30px;
+            border-radius: 16px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            text-align: center;
+        }
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        th {
+            background: #f5f5f5;
+            font-weight: 600;
+            width: 30%;
+        }
+        td {
+            font-family: 'Courier New', monospace;
+            word-break: break-all;
+        }
+        code {
+            background: #f5f5f5;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+        }
+        .highlight {
+            background: #fff3cd;
+            padding: 15px;
+            border-left: 4px solid #ffc107;
+            border-radius: 4px;
+            margin: 15px 0;
+        }
+        .success {
+            background: #d4edda;
+            padding: 15px;
+            border-left: 4px solid #28a745;
+            border-radius: 4px;
+            margin: 15px 0;
+        }
+        pre {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.9em;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin: 2px;
+        }
+        .badge-get { background: #d1ecf1; color: #0c5460; }
+        .badge-post { background: #d4edda; color: #155724; }
+        .badge-put { background: #fff3cd; color: #856404; }
+        .badge-delete { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 Enhanced Request API Demo</h1>
+            <p>Testing the new <code>request</code> table, <code>response</code> control, <code>print()</code>, and <code>html_escape()</code></p>
+        </header>
+
+        <!-- Request Method -->
+        <div class="card">
+            <h2>📋 HTTP Method</h2>
+            <div class="success">
+                Request Method: <strong><?lua return request.method ?></strong>
+                <?lua 
+                    local method = request.method
+                    local badge_class = "badge-get"
+                    if method == "POST" then badge_class = "badge-post"
+                    elseif method == "PUT" then badge_class = "badge-put"
+                    elseif method == "DELETE" then badge_class = "badge-delete"
+                    end
+                    return '<span class="badge ' .. badge_class .. '">' .. method .. '</span>'
+                ?>
+            </div>
+        </div>
+
+        <!-- Request Path -->
+        <div class="card">
+            <h2>🛣️ Request Path</h2>
+            <table>
+                <tr>
+                    <th>Full Path</th>
+                    <td><?lua return request.path ?></td>
+                </tr>
+                <tr>
+                    <th>Path Length</th>
+                    <td><?lua return #request.path ?> characters</td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- Query Parameters -->
+        <div class="card">
+            <h2>🔍 Query Parameters (request.query)</h2>
+            <?lua
+                local count = 0
+                for _ in pairs(request.query) do count = count + 1 end
+                if count == 0 then
+                    return '<div class="highlight">No query parameters. Try adding <code>?name=John&age=25</code> to the URL!</div>'
+                end
+            ?>
+            <table>
+                <tr>
+                    <th>Parameter</th>
+                    <th>Value</th>
+                </tr>
+                <?lua
+                    local rows = ""
+                    for key, value in pairs(request.query) do
+                        rows = rows .. "<tr><td><code>" .. key .. "</code></td><td>" .. html_escape(value) .. "</td></tr>"
+                    end
+                    return rows
+                ?>
+            </table>
+        </div>
+
+        <!-- Request Headers -->
+        <div class="card">
+            <h2>📨 HTTP Headers (request.headers)</h2>
+            <table>
+                <tr>
+                    <th>Header Name</th>
+                    <th>Value</th>
+                </tr>
+                <?lua
+                    local rows = ""
+                    local headers = {}
+                    for name, value in pairs(request.headers) do
+                        table.insert(headers, {name = name, value = value})
+                    end
+                    table.sort(headers, function(a, b) return a.name < b.name end)
+                    for _, h in ipairs(headers) do
+                        rows = rows .. "<tr><td><code>" .. h.name .. "</code></td><td>" .. h.value .. "</td></tr>"
+                    end
+                    return rows
+                ?>
+            </table>
+        </div>
+
+        <!-- Testing print() function -->
+        <div class="card">
+            <h2>🖨️ Testing print() Function</h2>
+            <p>The new <code>print()</code> function makes outputting text easier:</p>
+            <div class="success">
+                <?lua print("Hello from print()!") ?>
+            </div>
+            <div class="success">
+                <?lua print("Current time:", os.date("%H:%M:%S")) ?>
+            </div>
+            <div class="success">
+                <?lua print("2 + 2 =", 2 + 2) ?>
+            </div>
+        </div>
+
+        <!-- Testing html_escape() -->
+        <div class="card">
+            <h2>🔒 Testing html_escape() Function</h2>
+            <p>Prevents XSS attacks by escaping HTML entities:</p>
+            <table>
+                <tr>
+                    <th>Raw Input</th>
+                    <th>Escaped Output</th>
+                </tr>
+                <tr>
+                    <td><code>&lt;script&gt;alert('XSS')&lt;/script&gt;</code></td>
+                    <td><?lua return html_escape("<script>alert('XSS')</script>") ?></td>
+                </tr>
+                <tr>
+                    <td><code>&lt;img src=x onerror=alert(1)&gt;</code></td>
+                    <td><?lua return html_escape("<img src=x onerror=alert(1)>") ?></td>
+                </tr>
+                <tr>
+                    <td><code>A &amp; B &lt; C &gt; D</code></td>
+                    <td><?lua return html_escape("A & B < C > D") ?></td>
+                </tr>
+            </table>
+            
+            <?lua
+                local user_input = request.query.comment or ""
+                if user_input ~= "" then
+                    return '<div class="highlight"><strong>Your comment (safely escaped):</strong><br>' .. html_escape(user_input) .. '</div>'
+                end
+            ?>
+            
+            <form method="get" style="margin-top: 15px;">
+                <input type="text" name="comment" placeholder="Try entering HTML tags..." style="width: 70%; padding: 8px; border: 2px solid #667eea; border-radius: 4px;">
+                <button type="submit" style="padding: 8px 20px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer;">Test</button>
+            </form>
+        </div>
+
+        <!-- Response Control -->
+        <div class="card">
+            <h2>⚙️ Response Control</h2>
+            <p>You can control the HTTP response using the <code>response</code> table:</p>
+            <pre><code>&lt;?lua
+    -- Set custom status code
+    response.status = 200
+    
+    -- Set custom headers
+    response.headers["X-Custom-Header"] = "Hello!"
+    response.headers["X-Powered-By"] = "Lua + Rust"
+?&gt;</code></pre>
+            
+            <?lua
+                -- Set a custom header to demonstrate
+                response.headers["X-Demo-Header"] = "This is a custom header!"
+                response.headers["X-Lua-Version"] = _VERSION
+            ?>
+            
+            <div class="success">
+                ✅ Custom headers have been set! Check your browser's developer tools (Network tab) to see them.
+            </div>
+        </div>
+
+        <!-- Code Examples -->
+        <div class="card">
+            <h2>📝 Migration Guide</h2>
+            <h3 style="margin-top: 15px; color: #667eea;">Old API (deprecated):</h3>
+            <pre><code>&lt;?lua
+    local name = request. query["name"]
+    local user_id = request.query["id"]
+?&gt;</code></pre>
+            
+            <h3 style="margin-top: 15px; color: #667eea;">New API (recommended):</h3>
+            <pre><code>&lt;?lua
+    local name = request.query.name
+    local user_id = request.query.id
+    local method = request.method
+    local path = request.path
+    local user_agent = request.headers["user-agent"]
+    
+    -- Use print() for easier output
+    print("Welcome, " .. (name or "Guest") .. "!")
+    
+    -- Escape user input to prevent XSS
+    print("Safe output: " .. html_escape(user_input))
+    
+    -- Control the response
+    response.status = 200
+    response.headers["Cache-Control"] = "no-cache"
+?&gt;</code></pre>
+        </div>
+
+        <!-- Feature Summary -->
+        <div class="card">
+            <h2>✨ New Features Summary</h2>
+            <table>
+                <tr>
+                    <th>Feature</th>
+                    <th>Description</th>
+                </tr>
+                <tr>
+                    <td><code>request.method</code></td>
+                    <td>HTTP method (GET, POST, PUT, DELETE, etc.)</td>
+                </tr>
+                <tr>
+                    <td><code>request.path</code></td>
+                    <td>Request URL path</td>
+                </tr>
+                <tr>
+                    <td><code>request.query</code></td>
+                    <td>URL query parameters (replaces global <code>query</code>)</td>
+                </tr>
+                <tr>
+                    <td><code>request.headers</code></td>
+                    <td>HTTP request headers</td>
+                </tr>
+                <tr>
+                    <td><code>response.status</code></td>
+                    <td>Set HTTP status code (default: 200)</td>
+                </tr>
+                <tr>
+                    <td><code>response.headers</code></td>
+                    <td>Set custom response headers</td>
+                </tr>
+                <tr>
+                    <td><code>print(...)</code></td>
+                    <td>Easy text output (returns concatenated string)</td>
+                </tr>
+                <tr>
+                    <td><code>html_escape(str)</code></td>
+                    <td>Escape HTML to prevent XSS attacks</td>
+                </tr>
+            </table>
+        </div>
+
+        <footer style="text-align: center; color: white; margin-top: 30px; opacity: 0.9;">
+            <p>Built with 🦀 Rust + 🌙 Lua | <?lua return os.date("%Y") ?></p>
+            <p style="margin-top: 5px;">
+                <a href="/index.lhtml" style="color: white;">Home</a> •
+                <a href="/demo.lhtml" style="color: white;">Demo</a> •
+                <a href="/request-demo.lhtml" style="color: white;">Request API</a> •
+                <a href="/info.lhtml" style="color: white;">Lua Info</a>
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

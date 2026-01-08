@@ -1,0 +1,53 @@
+<?lua
+    if request.method == "POST" and tonumber(request.body.responsecode) ~= nil then
+        response.status = request.body.responsecode or response.status
+    end
+?>
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>POST Test</title>
+</head>
+<body>
+    <h1>POST Request Test</h1>
+    
+    <p>Request Method: <strong><?lua print(request.method) ?></strong></p>
+    
+    <h3>Post Body:</h3>
+    <ul>
+        <?lua 
+            local count = 0
+            log.warn(request.body)
+            for k, v in pairs(request.body) do 
+                log.info("Printing " .. k .. ", " .. v)
+                count = count + 1
+                print("<li><strong>" .. k .. ":</strong> " .. html_escape(v) .. "</li>")
+            end
+            
+            if count == 0 then
+                print("<li><em>No POST body parameters received</em></li>")
+            end
+        ?>
+    </ul>
+
+    <hr>
+
+    <h3>Test Form (POST)</h3>
+    <form method="POST" action="post-test.lhtml?source=form">
+        <div>
+            <label>Name:</label>
+            <input type="text" name="name" value="User">
+        </div>
+        <div>
+            <label>Message:</label>
+            <input type="text" name="message" value="Hello, World!">
+        </div>
+        <div>
+            <label>Response Code:</label>
+            <input type="text" name="responsecode" value="200">
+        <br>
+        <button type="submit">Submit via POST</button>
+    </form>
+</body>
+</html>
