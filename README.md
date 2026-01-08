@@ -176,27 +176,6 @@ Log messages to the server console:
     <li>User-Agent: <?lua print(request.headers["user-agent"] or "N/A") ?></li>
 </ul>
 
-## Project Structure
-
-```
-lua-html-renderer
-├── src
-│   ├── lua_runtime
-│   │   ├── mod.rs        # Lua runtime with request/response handling
-│   │   └── utils.rs      # Utility functions
-│   ├── web
-│   │   ├── mod.rs        # Web server module
-│   │   └── handlers.rs   # HTTP request handlers
-│   ├── config.rs         # Configuration
-│   └── main.rs           # Application entry point
-├── demos                 # Example .lhtml files
-│   ├── demo.lhtml        # Feature showcase
-│   ├── request-demo.lhtml # Request API examples
-│   └── info.lhtml        # Lua environment info
-├── Cargo.toml            # Rust dependencies
-└── README.md             # This file
-```
-
 ## Configuration
 
 The server serves files from the `demos/` directory by default. Modify `src/config.rs` to change the served directory.
