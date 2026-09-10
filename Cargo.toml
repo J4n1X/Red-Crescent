@@ -1,15 +1,52 @@
 [package]
 name = "Red-Crescent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
-[dependencies]
-actix-web = "4.12.1"
-log = "0.4.29"
-mlua = { version = "0.11.5", features = ["lua54", "send", "serde"] }
-regex = "1.12.2"
-tokio = {version = "1.49.0", features = ["full"] }
-pretty_env_logger = "0.5.0"
-serde_json = "1.0.149"
-anyhow = "1.0.100"
+[features]
+# Native Lua C modules need the binary to export its statically linked Lua C
+# API (build.rs adds -rdynamic). Off by default; `--features c-modules` to
+# build a binary that can load them. build.rs, the startup guard in main.rs
+# and the module-loading test all key off this, so removing it makes native
+# modules unreachable rather than merely disabled.
+c-modules = []
 
+[lib]
+name = "red_crescent"
+path = "src/lib.rs"
+
+[dependencies]
+actix-files = "0.6"
+actix-multipart = "0.8"
+actix-web = "4.12.1"
+argon2 = "0.6"
+clap = { version = "4.5", features = ["derive", "env"] }
+futures-util = "0.3"
+getrandom = "0.4"
+log = "0.4.29"
+mlua = { version = "0.11.5", features = ["lua54", "serde", "vendored"] }
+percent-encoding = "2"
+pretty_env_logger = "0.5.0"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json = "1.0.149"
+serde_urlencoded = "0.7"
+sha2 = "0.10"
+tempfile = "3"
+
+[dev-dependencies]
+actix-http = "3"
+
+[profile.release-compact]
+# Required by cargo: every custom profile must name the one it extends.
+inherits = "release"
+strip = "debuginfo"
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.release]
+strip = "debuginfo"
+opt-level = 3
+lto = true
+panic = "abort"

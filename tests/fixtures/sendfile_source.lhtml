@@ -1,0 +1,12 @@
+<?lua
+    -- Server-side source must never be sendable, even by an app that passes
+    -- a user-controlled path straight to send_file. (Only refusals are
+    -- checked here: a successful send_file would replace this output.)
+    local function refused(path)
+        local ok = pcall(function() response.send_file(path) end)
+        return tostring(not ok)
+    end
+    local serve_dir = request.query.serve_dir
+    print("lua_source=" .. refused(serve_dir .. "/secret.lua") .. ";")
+    print("dotfile=" .. refused(serve_dir .. "/.hidden.txt"))
+?>

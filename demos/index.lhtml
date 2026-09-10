@@ -1,62 +1,48 @@
-<?lua 
-    -- set up some date info
-    log.info("Calculating date information")
-    today = os.date("*t")
-    last_day = os.date("*t", os.time({
+<?lua
+    -- The nav partial and the shared utils module showcase include() and require()
+    local utils = require("utils")
+
+    log.info("Index page rendered")
+
+    local today = os.date("*t")
+    local last_day = os.date("*t", os.time({
         year = today.year,
         month = today.month + 1,
         day = 0
     })).day
-    num_days = last_day - today.day + 1
-    log.warn(response.status)
+    local num_days = last_day - today.day + 1
 ?>
-<html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Red Crescent</title>
+    <link rel="stylesheet" href="/assets/site.css">
+</head>
 <body>
-    <h1><?lua
-        local head = "Welcome to my Custom Handler"
-        if request.query["name"] ~= nil then
-            return head .. ", " .. request.query["name"] .. "!"
-        else
-            return head .. "!"
-        end
-    ?></h1>
-    <h2>The current time is: <?lua return os.date("%H:%M:%S") ?></h2>
-    <h2>Remaining days of this month: </h2>
-    <ul>
-        <?lua 
-            local items = ""           
-            for day = today.day, last_day do
-                local timestamp = os.time({year = today.year, month = today.month, day = day})
-                local date_str = os.date("%A, %d %B %Y", timestamp)
-                items = items .. "<li>" .. date_str .. "</li>"
-            end
-            return items
-        ?>
-    </ul>
-    <h2>Some numbers about the remaining month:</h2>
-    <p>Total days remaining: <?lua return num_days ?></p>
-    <p>Weeks remaining (including this one): <?lua return math.ceil(num_days / 7) ?></p>
-    <p>Approximate hours of work remaining (8 hour work days): 
-        <?lua 
-            local work_days = 0
-            for day = today.day, last_day do
-                local timestamp = os.time({year = today.year, month = today.month, day = day})
-                local weekday = os.date("*t", timestamp).wday
-                if weekday ~= 1 and weekday ~= 7 then
-                    work_days = work_days + 1
-                end
-            end
-            -- if today is a workday, include remaining hours today
-            local today_weekday = today.wday
-            local remaining_hours_today = 0
-            if today_weekday ~= 1 and today_weekday ~= 7 then
-                local current_hour = tonumber(os.date("%H"))
-                -- remaining hours today must make sure the time is between 8 and 17 and minus one for lunch
-                remaining_hours_today = math.max(0, math.min(17 - current_hour, 8))
-            end
-                work_days = work_days - 1 -- exclude today from full work days
-                return (work_days * 8) + remaining_hours_today
-        ?>
-    </p>
+    <?lua include("partials/nav.lhtml") ?>
+    <main>
+        <h1>Welcome to Red Crescent<?lua= request.query.name and (", " .. html_escape(request.query.name)) or "" ?>!</h1>
+        <p>A PHP-like web server rendering <code>.lhtml</code> templates with Lua. This page uses
+        <code>include()</code> for the nav bar, <code>require()</code> for a shared Lua module,
+        and inline <code>&lt;?lua= ... ?&gt;</code> expressions.</p>
+
+        <h2>The current time is <?lua= os.date("%H:%M:%S") ?></h2>
+
+        <h2>Remaining days of this month</h2>
+        <ul>
+            <?lua for day = today.day, last_day do ?>
+                <li><?lua= os.date("%A, %d %B %Y", os.time({year = today.year, month = today.month, day = day})) ?></li>
+            <?lua end ?>
+        </ul>
+
+        <h2>Some numbers about the remaining month</h2>
+        <p>Total days remaining: <?lua= num_days ?></p>
+        <p>Weeks remaining (including this one): <?lua= math.ceil(num_days / 7) ?></p>
+        <p>Approximate hours of work remaining (8 hour work days, courtesy of <code>utils.lua</code>):
+            <?lua= utils.remaining_work_hours(today, last_day) ?>
+        </p>
+    </main>
 </body>
 </html>

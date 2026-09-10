@@ -1,0 +1,85 @@
+<?lua
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local filesm = require("lib.files")
+    local sharesm = require("lib.shares")
+    local util = require("lib.util")
+
+    local db = dbm.open()
+    local user = auth.require_login(db)
+
+    -- ?file=<id> or ?folder=<id>
+    local kind, target
+    if request.query.folder and request.query.folder ~= "" then
+        kind, target = "folder", filesm.get_folder(db, user, request.query.folder)
+    else
+        kind, target = "file", filesm.get_file(db, user, request.query.file)
+    end
+    if not target then
+        redirect("/?err=" .. util.urlencode("That item no longer exists."))
+    end
+
+    local shares = sharesm.for_target(db, user, kind, target)
+    local base = util.base_url()
+
+    page_title = "Share " .. target.name
+    current_user = user
+    csrf_html = auth.csrf_field(user)
+?>
+<?lua include("partials/header.lhtml") ?>
+
+<?lua= util.flash_html() ?>
+
+<h1><?lua= kind == "folder" and "📁" or "📄" ?> Share links for <?lua= html_escape(target.name) ?></h1>
+<p class="meta">
+    <?lua if kind == "folder" then ?>
+        Anyone with a link can browse this folder and download what is inside it.
+        · <a href="/?folder=<?lua= target.id ?>">open folder</a>
+    <?lua else ?>
+        <?lua= util.human_size(target.size) ?>
+        · <a href="/download.lhtml?id=<?lua= target.id ?>">download</a>
+    <?lua end ?>
+    · <a href="/">back to files</a>
+</p>
+
+<div class="panel">
+    <h2>Create a new link</h2>
+    <form class="rowform" method="post" action="/actions.lhtml">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="share_create">
+        <input type="hidden" name="kind" value="<?lua= kind ?>">
+        <input type="hidden" name="id" value="<?lua= target.id ?>">
+        <select name="expires">
+            <option value="">Never expires</option>
+            <option value="3600">1 hour</option>
+            <option value="86400">24 hours</option>
+            <option value="604800">7 days</option>
+        </select>
+        <button type="submit">Create link</button>
+    </form>
+</div>
+
+<?lua if #shares == 0 then ?>
+    <p class="meta">No share links yet.</p>
+<?lua else ?>
+    <?lua for _, share in ipairs(shares) do ?>
+        <div class="panel">
+            <span class="sharelink"><?lua= base ?>/s.lhtml?t=<?lua= util.urlencode(share.token) ?></span>
+            <p class="meta">
+                created <?lua= util.format_time(share.created_at) ?>
+                · <?lua= share.downloads ?> download<?lua= share.downloads == 1 and "" or "s" ?>
+                · <?lua if share.expires_at then ?>expires <?lua= util.format_time(share.expires_at) ?><?lua else ?>never expires<?lua end ?>
+            </p>
+            <form class="inline" method="post" action="/actions.lhtml">
+                <?lua= csrf_html ?>
+                <input type="hidden" name="action" value="share_revoke">
+                <input type="hidden" name="kind" value="<?lua= kind ?>">
+                <input type="hidden" name="id" value="<?lua= target.id ?>">
+                <input type="hidden" name="token" value="<?lua= html_escape(share.token) ?>">
+                <button class="danger" type="submit">Revoke</button>
+            </form>
+        </div>
+    <?lua end ?>
+<?lua end ?>
+
+<?lua include("partials/footer.lhtml") ?>

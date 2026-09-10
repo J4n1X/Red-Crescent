@@ -1,0 +1,78 @@
+<?lua
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local util = require("lib.util")
+
+    local db = dbm.open()
+    local user = auth.require_login(db)
+    if user.is_admin ~= 1 then
+        response.status = 403
+        print("403 Forbidden: admins only")
+        exit()
+    end
+
+    local users = db:query([[
+        SELECT u.*,
+               (SELECT COUNT(*) FROM files f WHERE f.owner_id = u.id) AS file_count,
+               (SELECT COALESCE(SUM(size), 0) FROM files f WHERE f.owner_id = u.id) AS bytes_used
+        FROM users u ORDER BY u.created_at
+    ]])
+    local default_quota = require("config").default_quota_bytes
+
+    page_title = "Admin"
+    current_user = user
+    csrf_html = auth.csrf_field(user)
+?>
+<?lua include("partials/header.lhtml") ?>
+
+<?lua= util.flash_html() ?>
+
+<h1>User management</h1>
+
+<table class="listing">
+    <tr><th>User</th><th>Registered</th><th>Files</th><th>Storage / quota</th><th>Status</th><th class="actions">Actions</th></tr>
+    <?lua for _, row in ipairs(users) do ?>
+        <tr>
+            <td><?lua= html_escape(row.username) ?><?lua if row.is_admin == 1 then ?> <span class="meta">(admin)</span><?lua end ?></td>
+            <td class="meta"><?lua= util.format_time(row.created_at) ?></td>
+            <td class="meta"><?lua= row.file_count ?></td>
+            <td class="meta">
+                <?lua= util.human_size(row.bytes_used) ?>
+                <?lua local q = row.quota_bytes or default_quota
+                      if q and q > 0 then ?> / <?lua= util.human_size(q) ?><?lua
+                      else ?> / unlimited<?lua end ?>
+                <form class="rowform" method="post" action="/actions.lhtml">
+                    <?lua= csrf_html ?>
+                    <input type="hidden" name="action" value="set_quota">
+                    <input type="hidden" name="id" value="<?lua= row.id ?>">
+                    <input type="text" name="quota_gib" size="4" placeholder="GiB"
+                           value="<?lua= row.quota_bytes and
+                               string.format("%.2f", row.quota_bytes / 1024 / 1024 / 1024) or "" ?>">
+                    <button class="linklike" type="submit">Set</button>
+                </form>
+            </td>
+            <td class="meta"><?lua= row.approved == 1 and "active" or "pending approval" ?></td>
+            <td class="actions">
+                <?lua if row.approved ~= 1 then ?>
+                    <form class="inline" method="post" action="/actions.lhtml">
+                        <?lua= csrf_html ?>
+                        <input type="hidden" name="action" value="approve_user">
+                        <input type="hidden" name="id" value="<?lua= row.id ?>">
+                        <button type="submit">Approve</button>
+                    </form>
+                <?lua end ?>
+                <?lua if row.id ~= user.id then ?>
+                    <form class="inline" method="post" action="/actions.lhtml"
+                          data-confirm="Delete this user and all their files?">
+                        <?lua= csrf_html ?>
+                        <input type="hidden" name="action" value="delete_user">
+                        <input type="hidden" name="id" value="<?lua= row.id ?>">
+                        <button class="danger" type="submit">Delete</button>
+                    </form>
+                <?lua end ?>
+            </td>
+        </tr>
+    <?lua end ?>
+</table>
+
+<?lua include("partials/footer.lhtml") ?>

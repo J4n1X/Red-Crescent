@@ -1,0 +1,4 @@
+<?lua
+    response.headers["Content-Type"] = "application/octet-stream"
+    print("\x00\x01\xFF\xFEraw")
+?>

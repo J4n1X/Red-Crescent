@@ -1,0 +1,1 @@
+<?lua local helper = require("libs.helper") ?><?lua= helper.greet("Bob") ?>

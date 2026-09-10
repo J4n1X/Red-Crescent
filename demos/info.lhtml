@@ -91,30 +91,26 @@
     <table>
         <tr>
             <th>Lua Version</th>
-            <td><?lua return lua_version ?></td>
+            <td><?lua= lua_version ?></td>
         </tr>
         <tr>
             <th>Current Date/Time</th>
-            <td><?lua return os_date ?></td>
+            <td><?lua= os_date ?></td>
         </tr>
         <tr>
             <th>Unix Timestamp</th>
-            <td><?lua return os_time ?></td>
+            <td><?lua= os_time ?></td>
         </tr>
         <tr>
             <th>Memory Usage</th>
-            <td><?lua return string.format("%.2f KB", memory_kb) ?></td>
+            <td><?lua= string.format("%.2f KB", memory_kb) ?></td>
         </tr>
         <tr>
             <th>Architecture</th>
-            <td><?lua 
+            <td><?lua
                 -- Try to detect architecture from package config
                 local sep = package.config:sub(1,1)
-                if sep == "\\" then
-                    return "Windows"
-                else
-                    return "Unix-like (Linux/macOS)"
-                end
+                print(sep == "\\" and "Windows" or "Unix-like (Linux/macOS)")
             ?></td>
         </tr>
     </table>
@@ -123,23 +119,23 @@
     <table>
         <tr>
             <th>Directory Separator</th>
-            <td><code><?lua return package.config:sub(1,1) ?></code></td>
+            <td><code><?lua= package.config:sub(1,1) ?></code></td>
         </tr>
         <tr>
             <th>Path Separator</th>
-            <td><code><?lua return package.config:sub(3,3) ?></code></td>
+            <td><code><?lua= package.config:sub(3,3) ?></code></td>
         </tr>
         <tr>
             <th>Template Marker</th>
-            <td><code><?lua return package.config:sub(5,5) ?></code></td>
+            <td><code><?lua= package.config:sub(5,5) ?></code></td>
         </tr>
         <tr>
             <th>Executable Dir Marker</th>
-            <td><code><?lua return package.config:sub(7,7) ?></code></td>
+            <td><code><?lua= package.config:sub(7,7) ?></code></td>
         </tr>
         <tr>
             <th>Ignore Marker</th>
-            <td><code><?lua return package.config:sub(9,9) ?></code></td>
+            <td><code><?lua= package.config:sub(9,9) ?></code></td>
         </tr>
     </table>
 
@@ -152,7 +148,7 @@
                 rows = rows .. "<tr><th>" .. i .. "</th><td>" .. path .. "</td></tr>"
                 i = i + 1
             end
-            return rows
+            print(rows)
         ?>
     </table>
 
@@ -165,7 +161,7 @@
                 rows = rows .. "<tr><th>" .. i .. "</th><td>" .. path .. "</td></tr>"
                 i = i + 1
             end
-            return rows
+            print(rows)
         ?>
     </table>
 
@@ -185,7 +181,7 @@
             for _, m in ipairs(modules) do
                 rows = rows .. "<tr><th>" .. m.name .. "</th><td>" .. type(m.mod) .. "</td></tr>"
             end
-            return rows
+            print(rows)
         ?>
     </table>
 
@@ -206,7 +202,7 @@
                 local t = type(g.val)
                 rows = rows .. "<tr><th>" .. tostring(g.name) .. "</th><td>" .. t .. "</td></tr>"
             end
-            return rows
+            print(rows)
         ?>
     </table>
 
@@ -233,7 +229,7 @@
                 local status = lib[2] and "Yes" or "No"
                 rows = rows .. "<tr><th>" .. lib[1] .. "</th><td>" .. status .. "</td></tr>"
             end
-            return rows
+            print(rows)
         ?>
     </table>
 
@@ -241,19 +237,19 @@
     <table>
         <tr>
             <th>math.pi</th>
-            <td><?lua return math.pi ?></td>
+            <td><?lua= math.pi ?></td>
         </tr>
         <tr>
             <th>math.huge</th>
-            <td><?lua return math.huge ?></td>
+            <td><?lua= math.huge ?></td>
         </tr>
         <tr>
             <th>math.maxinteger</th>
-            <td><?lua return math.maxinteger or "N/A (Lua 5.2 or earlier)" ?></td>
+            <td><?lua= math.maxinteger or "N/A (Lua 5.2 or earlier)" ?></td>
         </tr>
         <tr>
             <th>math.mininteger</th>
-            <td><?lua return math.mininteger or "N/A (Lua 5.2 or earlier)" ?></td>
+            <td><?lua= math.mininteger or "N/A (Lua 5.2 or earlier)" ?></td>
         </tr>
     </table>
 
@@ -272,7 +268,7 @@
                 local status = string[fn] and "Yes" or "No"
                 rows = rows .. "<tr><th>string." .. fn .. "</th><td>" .. status .. "</td></tr>"
             end
-            return rows
+            print(rows)
         ?>
     </table>
 
@@ -290,7 +286,7 @@
                 local status = table[fn] and "Yes" or "No"
                 rows = rows .. "<tr><th>table." .. fn .. "</th><td>" .. status .. "</td></tr>"
             end
-            return rows
+            print(rows)
         ?>
     </table>
 
@@ -308,7 +304,7 @@
                 local status = os[fn] and "Yes" or "No"
                 rows = rows .. "<tr><th>os." .. fn .. "</th><td>" .. status .. "</td></tr>"
             end
-            return rows
+            print(rows)
         ?>
     </table>
 
@@ -334,7 +330,7 @@
                     rows = rows .. "<tr><th>" .. var .. "</th><td>" .. val .. "</td></tr>"
                 end
             end
-            return rows
+            print(rows)
         ?>
     </table>
 
@@ -342,25 +338,25 @@
     <table>
         <tr>
             <th>Current Memory (KB)</th>
-            <td><?lua return string.format("%.2f", collectgarbage("count")) ?></td>
+            <td><?lua= string.format("%.2f", collectgarbage("count")) ?></td>
         </tr>
         <tr>
             <th>GC Step Multiplier</th>
-            <td><?lua 
+            <td><?lua
                 local ok, val = pcall(function() return collectgarbage("setstepmul", 200) end)
-                if ok then 
+                if ok then
                     collectgarbage("setstepmul", val)
-                    return val 
-                else 
-                    return "N/A" 
+                    print(val)
+                else
+                    print("N/A")
                 end
             ?></td>
         </tr>
     </table>
 
     <p style="text-align: center; color: #666; margin-top: 30px;">
-        Generated at <?lua return os.date("%Y-%m-%d %H:%M:%S") ?> | 
-        <?lua return _VERSION ?>
+        Generated at <?lua= os.date("%Y-%m-%d %H:%M:%S") ?> | 
+        <?lua= _VERSION ?>
     </p>
 </body>
 </html>

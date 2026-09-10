@@ -1,0 +1,8 @@
+<?lua
+-- Two spawns racing on one name: the loser is handed the winner's run id so
+-- it can still watch what the winner started.
+local a, id1 = thread.spawn("twice", "jobs/thread_slow.lua")
+local b, id2 = thread.spawn("twice", "jobs/thread_slow.lua")
+print("first=" .. tostring(a) .. " second=" .. tostring(b)
+   .. " same_id=" .. tostring(id1 == id2))
+?>

@@ -1,0 +1,1 @@
+<?lua= tostring(thread.spawn(request.query.name, request.query.script)) ?>|<?lua= tostring(thread.running(request.query.name)) ?>

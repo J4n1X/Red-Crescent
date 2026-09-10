@@ -1,0 +1,10 @@
+<?lua
+    -- Write a binary file into the data dir, then serve it as a download.
+    local path = server.data_dir .. "/download-me.bin"
+    local f = assert(io.open(path, "wb"))
+    f:write("BIN\xFF\xFE\x00DATA")
+    f:close()
+    response.set_cookie{ name = "dl", value = "yes" }
+    response.send_file(path, { download_name = "report.bin", content_type = "application/octet-stream" })
+    print("this rendered output must be discarded")
+?>

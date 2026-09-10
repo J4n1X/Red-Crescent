@@ -1,0 +1,1 @@
+data_dir=<?lua= server.data_dir ?>;version=<?lua= server.version ?>

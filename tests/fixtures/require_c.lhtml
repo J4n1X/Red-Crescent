@@ -1,0 +1,10 @@
+<?lua
+local ok, lpeg = pcall(require, "lpeg")
+if not ok then
+    print("failed=" .. tostring(lpeg))
+    return
+end
+-- Exercise it for real: a pattern matching one or more digits.
+local digits = lpeg.match(lpeg.R("09") ^ 1, "2026 crescent")
+print("loaded=" .. lpeg.version .. " matched=" .. tostring(digits))
+?>

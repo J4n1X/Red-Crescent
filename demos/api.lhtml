@@ -1,0 +1,39 @@
+<?lua
+    -- A small JSON API endpoint. Try:
+    --   curl http://127.0.0.1:8080/api.lhtml
+    --   curl -X POST -H 'Content-Type: application/json' \
+    --        -d '{"name":"Ada"}' http://127.0.0.1:8080/api.lhtml
+    response.headers["Content-Type"] = "application/json"
+
+    if request.method == "GET" then
+        print(json.encode({
+            service = "red-crescent",
+            time = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            lua = _VERSION,
+            hint = "POST a JSON body like {\"name\":\"Ada\"} to this endpoint",
+        }, true))
+        exit()
+    end
+
+    if request.method ~= "POST" then
+        response.status = 405
+        response.headers["Allow"] = "GET, POST"
+        print(json.encode({ error = "method not allowed" }))
+        exit()
+    end
+
+    local name = request.body.name
+    if type(name) ~= "string" or name == "" then
+        response.status = 422
+        print(json.encode({ error = "expected a JSON body with a 'name' string field" }))
+        exit()
+    end
+
+    -- Remember the last greeted name in a cookie, just to show cookies work
+    response.set_cookie{ name = "last_name", value = name, path = "/", max_age = 3600 }
+
+    print(json.encode({
+        greeting = "Hello, " .. name .. "!",
+        previous = request.cookies.last_name,
+    }, true))
+?>

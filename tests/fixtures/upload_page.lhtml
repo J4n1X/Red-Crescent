@@ -1,0 +1,11 @@
+<?lua
+    print("nfiles=" .. #request.files .. ";note=" .. (request.body.note or "?") .. ";")
+    for i, f in ipairs(request.files) do
+        print("f" .. i .. "=" .. f.field .. "," .. f.filename .. "," .. f.size .. ";")
+    end
+    if request.query.keep == "1" and request.files[1] then
+        local dest = server.data_dir .. "/kept.bin"
+        assert(os.rename(request.files[1].path, dest))
+        print("kept=1;")
+    end
+?>

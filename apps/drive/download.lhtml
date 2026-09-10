@@ -1,0 +1,22 @@
+<?lua
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local filesm = require("lib.files")
+
+    local db = dbm.open()
+    local user = auth.require_login(db)
+
+    -- Folder archives live in archive.lhtml: they are built by a worker
+    -- thread, so serving one is a separate step from asking for it.
+    local file = filesm.get_file(db, user, request.query.id)
+    if not file then
+        response.status = 404
+        print("404 Not Found")
+        exit()
+    end
+
+    response.send_file(filesm.disk_path(file), {
+        download_name = file.name,
+        content_type = file.content_type,
+    })
+?>

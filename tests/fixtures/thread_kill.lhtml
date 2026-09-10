@@ -1,0 +1,14 @@
+<?lua
+local action = request.query.action
+if action == "spawn" then
+    local _, id = thread.spawn(request.query.name, request.query.script)
+    print("id=" .. tostring(id))
+elseif action == "kill" then
+    print("killed=" .. tostring(thread.kill(tonumber(request.query.id))))
+elseif action == "join" then
+    local status = thread.join(tonumber(request.query.id), tonumber(request.query.wait) or 5)
+    print("status=" .. tostring(status))
+elseif action == "running" then
+    print("running=" .. tostring(thread.running(request.query.name)))
+end
+?>

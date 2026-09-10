@@ -1,0 +1,1 @@
+<?lua include("partials/head.lhtml") ?>body:<?lua= site_name ?>

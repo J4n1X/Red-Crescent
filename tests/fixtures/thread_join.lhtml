@@ -1,0 +1,12 @@
+<?lua
+local spawned, id = thread.spawn(request.query.name, request.query.script,
+    { label = request.query.label or "none", n = tonumber(request.query.n) or 0 })
+local status, value = thread.join(id, 5)
+print("spawned=" .. tostring(spawned) .. " status=" .. tostring(status))
+if type(value) == "table" then
+    print(" got=" .. tostring(value.got) .. " doubled=" .. tostring(value.doubled))
+    print(" ok=" .. tostring(value.ok) .. " err=" .. tostring(value.err))
+elseif value ~= nil then
+    print(" value=" .. tostring(value))
+end
+?>

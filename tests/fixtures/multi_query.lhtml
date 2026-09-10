@@ -1,0 +1,1 @@
+<?lua= request.query.a ?>|<?lua= #request.query_all.a ?>|<?lua= request.query_all.a[1] ?>

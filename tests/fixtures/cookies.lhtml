@@ -1,0 +1,3 @@
+<?lua
+    response.set_cookie{ name = "sid", value = "abc123", path = "/", http_only = true }
+?>session=<?lua= request.cookies.session or "none" ?>

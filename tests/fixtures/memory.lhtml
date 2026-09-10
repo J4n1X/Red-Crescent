@@ -1,0 +1,6 @@
+<?lua
+    local t = {}
+    for i = 1, 1000000000 do
+        t[i] = ("x"):rep(1000)
+    end
+?>

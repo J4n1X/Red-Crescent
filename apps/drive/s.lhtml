@@ -1,0 +1,173 @@
+<?lua
+    -- Public share page — no login. Serves a single shared file, or lets
+    -- anyone browse and download inside a shared folder.
+    --   ?t=<token>            the share
+    --   &f=<folder_id>        a subfolder (must live inside the shared tree)
+    --   &dl=<file_id>         download one file (must live inside the tree)
+    --   &zip=1                download the folder (or subfolder) as an archive
+    local dbm = require("lib.db")
+    local filesm = require("lib.files")
+    local sharesm = require("lib.shares")
+    local util = require("lib.util")
+
+    local db = dbm.open()
+    local share = sharesm.lookup(db, request.query.t)
+
+    local function gone(message)
+        response.status = 404
+        page_title = "Link not found"
+        current_user = nil
+        csrf_html = ""
+        include("partials/header.lhtml")
+        print('<div class="authbox"><h1>Link not found</h1><p>'
+            .. html_escape(message) .. "</p></div>")
+        include("partials/footer.lhtml")
+        exit()
+    end
+
+    if not share then
+        gone("This share link does not exist, was revoked, or has expired.")
+    end
+
+    -- Everything inside a share is read through its creator's ownership.
+    local owner = { id = share.owner_id }
+    local token_param = util.urlencode(share.token)
+
+    -- --- single-file share -------------------------------------------------
+
+    if share.kind == "file" then
+        if request.query.dl == "1" then
+            sharesm.count_download(db, share.token)
+            response.send_file(filesm.disk_path(share.file), {
+                download_name = share.file.name,
+                content_type = share.file.content_type,
+            })
+            exit()
+        end
+        page_title = share.file.name
+        current_user = nil
+        csrf_html = ""
+?>
+<?lua include("partials/header.lhtml") ?>
+<div class="authbox">
+    <h1>📄 <?lua= html_escape(share.file.name) ?></h1>
+    <p class="meta">
+        <?lua= util.human_size(share.file.size) ?> · shared <?lua= util.format_time(share.created_at) ?>
+        · <?lua= share.downloads ?> download<?lua= share.downloads == 1 and "" or "s" ?>
+        <?lua if share.expires_at then ?>· link expires <?lua= util.format_time(share.expires_at) ?><?lua end ?>
+    </p>
+    <a class="bigdl" href="/s.lhtml?t=<?lua= token_param ?>&amp;dl=1">⬇ Download</a>
+</div>
+<?lua include("partials/footer.lhtml") ?>
+<?lua
+        exit()
+    end
+
+    -- --- folder share ------------------------------------------------------
+
+    local root = share.folder
+
+    -- Which folder inside the share are we looking at?
+    local folder = root
+    if request.query.f and request.query.f ~= "" then
+        local requested = filesm.get_folder(db, owner, request.query.f)
+        if not requested or not filesm.is_within(db, owner.id, requested.id, root.id) then
+            gone("That folder is not part of this share.")
+        end
+        folder = requested
+    end
+
+    -- Download one file, but only from inside the shared tree.
+    if request.query.dl and request.query.dl ~= "" then
+        local file = filesm.get_file(db, owner, request.query.dl)
+        local reachable = file and (
+            (file.folder_id == root.id)
+            or (file.folder_id and filesm.is_within(db, owner.id, file.folder_id, root.id)))
+        if not reachable then
+            gone("That file is not part of this share.")
+        end
+        sharesm.count_download(db, share.token)
+        response.send_file(filesm.disk_path(file), {
+            download_name = file.name,
+            content_type = file.content_type,
+        })
+        exit()
+    end
+
+    -- Download the whole (sub)folder as an archive.
+    if request.query.zip == "1" then
+        local archive = require("lib.archive")
+        local built, err = archive.build(db, owner, folder)
+        if not built then
+            redirect("/s.lhtml?t=" .. token_param
+                .. (folder.id ~= root.id and ("&f=" .. folder.id) or "")
+                .. "&err=" .. util.urlencode("Could not build the archive: " .. tostring(err)))
+        end
+        sharesm.count_download(db, share.token)
+        response.send_file(built.path, {
+            download_name = built.filename,
+            content_type = built.content_type,
+        })
+        exit()
+    end
+
+    local subfolders, files = filesm.list(db, owner, folder)
+    local archiver = require("lib.archive").detect()
+
+    -- Breadcrumbs stop at the share root — nothing above it is visible.
+    local crumbs, walk, guard = {}, folder, 0
+    while walk and guard < 64 do
+        table.insert(crumbs, 1, walk)
+        if walk.id == root.id then break end
+        walk = walk.parent_id and filesm.get_folder(db, owner, walk.parent_id) or nil
+        guard = guard + 1
+    end
+
+    page_title = folder.name
+    current_user = nil
+    csrf_html = ""
+?>
+<?lua include("partials/header.lhtml") ?>
+
+<?lua= util.flash_html() ?>
+
+<h1>📁 <?lua= html_escape(root.name) ?></h1>
+<p class="meta">
+    Shared folder · <?lua= util.format_time(share.created_at) ?>
+    · <?lua= share.downloads ?> download<?lua= share.downloads == 1 and "" or "s" ?>
+    <?lua if share.expires_at then ?>· link expires <?lua= util.format_time(share.expires_at) ?><?lua end ?>
+</p>
+
+<div class="crumbs">
+    <?lua for i, crumb in ipairs(crumbs) do ?>
+        <?lua if i > 1 then ?><span class="sep">/</span><?lua end ?>
+        <a href="/s.lhtml?t=<?lua= token_param ?>&amp;f=<?lua= crumb.id ?>"><?lua= html_escape(crumb.name) ?></a>
+    <?lua end ?>
+    <?lua if archiver then ?>
+        <span class="sep">·</span>
+        <a href="/s.lhtml?t=<?lua= token_param ?>&amp;f=<?lua= folder.id ?>&amp;zip=1">⬇ Download this folder as <?lua= archiver.ext:upper() ?></a>
+    <?lua end ?>
+</div>
+
+<table class="listing">
+    <tr><th>Name</th><th>Size</th><th>Added</th></tr>
+    <?lua for _, sub in ipairs(subfolders) do ?>
+        <tr>
+            <td>📁 <a href="/s.lhtml?t=<?lua= token_param ?>&amp;f=<?lua= sub.id ?>"><?lua= html_escape(sub.name) ?></a></td>
+            <td class="meta">—</td>
+            <td class="meta"><?lua= util.format_time(sub.created_at) ?></td>
+        </tr>
+    <?lua end ?>
+    <?lua for _, file in ipairs(files) do ?>
+        <tr>
+            <td>📄 <a href="/s.lhtml?t=<?lua= token_param ?>&amp;dl=<?lua= file.id ?>"><?lua= html_escape(file.name) ?></a></td>
+            <td class="meta"><?lua= util.human_size(file.size) ?></td>
+            <td class="meta"><?lua= util.format_time(file.created_at) ?></td>
+        </tr>
+    <?lua end ?>
+    <?lua if #subfolders == 0 and #files == 0 then ?>
+        <tr><td colspan="3" class="meta">This folder is empty.</td></tr>
+    <?lua end ?>
+</table>
+
+<?lua include("partials/footer.lhtml") ?>

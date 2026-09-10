@@ -1,0 +1,1 @@
+<?lua pcall(function() while true do end end) print("survived") ?>

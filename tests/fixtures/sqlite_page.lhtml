@@ -1,0 +1,19 @@
+<?lua
+    local db = sqlite.open("test/app.db")
+    db:execute("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, title TEXT, weight REAL, data BLOB)")
+    db:execute("DELETE FROM notes")
+    local r = db:execute("INSERT INTO notes (title, weight, data) VALUES (?, ?, ?)",
+        {"hello & goodbye", 2.5, "\xFF\xFE\x00binary"})
+    print("rowid=" .. r.last_insert_rowid .. ";changes=" .. r.changes .. ";")
+    local rows = db:query("SELECT * FROM notes WHERE title = ?", {"hello & goodbye"})
+    print("count=" .. #rows .. ";title=" .. rows[1].title .. ";weight=" .. rows[1].weight ..
+          ";bloblen=" .. #rows[1].data .. ";")
+    local none = db:query("SELECT * FROM notes WHERE id = ?", {999})
+    print("empty=" .. #none .. ";")
+    -- sqlite.NULL binds SQL NULL even in the middle of the params array
+    db:execute("INSERT INTO notes (title, weight, data) VALUES (?, ?, ?)",
+        {"nulltest", sqlite.NULL, "after-null"})
+    local nulls = db:query("SELECT data FROM notes WHERE title = ? AND weight IS NULL", {"nulltest"})
+    print("null_ok=" .. tostring(#nulls == 1 and nulls[1].data == "after-null"))
+    db:close()
+?>

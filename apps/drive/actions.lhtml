@@ -1,0 +1,183 @@
+<?lua
+    -- POST target for every mutation. Verifies the session and CSRF token,
+    -- dispatches on the `action` field, then redirects back with a flash.
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local filesm = require("lib.files")
+    local sharesm = require("lib.shares")
+    local util = require("lib.util")
+
+    if request.method ~= "POST" then
+        response.status = 405
+        response.headers["Allow"] = "POST"
+        print("405 Method Not Allowed")
+        exit()
+    end
+
+    local db = dbm.open()
+    local user = auth.require_login(db)
+    auth.check_csrf(user)
+
+    local folder_param = request.body.folder or ""
+
+    local function back(target, msg, err)
+        local parts = {}
+        if target == "/" and folder_param ~= "" then
+            table.insert(parts, "folder=" .. util.urlencode(folder_param))
+        end
+        if msg then table.insert(parts, "msg=" .. util.urlencode(msg)) end
+        if err then table.insert(parts, "err=" .. util.urlencode(err)) end
+        redirect(target .. (#parts > 0 and ("?" .. table.concat(parts, "&")) or ""))
+    end
+
+    local function current_folder()
+        if folder_param == "" then return nil end
+        local folder = filesm.get_folder(db, user, folder_param)
+        if not folder then back("/", nil, "Folder not found.") end
+        return folder
+    end
+
+    local function need_file()
+        local file = filesm.get_file(db, user, request.body.id)
+        if not file then back("/", nil, "File not found.") end
+        return file
+    end
+
+    local action = request.body.action or ""
+
+    if action == "upload" then
+        local folder = current_folder()
+        local stored, failed = 0, {}
+
+        -- One transaction for the whole batch. Without it every file is its
+        -- own commit (an fsync each), which is what made a 4000-file folder
+        -- upload run past the execution limit and land half-stored. It also
+        -- makes the batch atomic: a failure leaves no half-built tree, only
+        -- unreferenced blobs that the cleanup thread collects.
+        local folder_cache = {}
+
+        -- Remaining quota for this batch, computed once and decremented per
+        -- stored file rather than re-summed for each of them.
+        local quota = filesm.quota(db, user)
+        local budget = quota and { remaining = quota - filesm.usage(db, user) } or nil
+        if budget and budget.remaining <= 0 then
+            back("/", nil, "Your storage quota is full. Delete something first.")
+        end
+
+        db:execute("BEGIN")
+        local ok, err = pcall(function()
+            for _, upload in ipairs(request.files) do
+                -- An unfilled file input still submits one empty part; skip it.
+                if upload.filename ~= "" or upload.size > 0 then
+                    local name, store_err =
+                        filesm.store_upload(db, user, folder, upload, folder_cache, budget)
+                    if name then
+                        stored = stored + 1
+                    else
+                        log.warn("drive: upload failed: " .. tostring(store_err))
+                        table.insert(failed, upload.filename)
+                    end
+                end
+            end
+        end)
+        if not ok then
+            db:execute("ROLLBACK")
+            log.error("drive: upload batch failed: " .. tostring(err))
+            back("/", nil, "The upload failed and was rolled back.")
+        end
+        db:execute("COMMIT")
+
+        if stored == 0 and #failed == 0 then back("/", nil, "No file was uploaded.") end
+        if #failed > 0 then
+            local reason = (budget and budget.remaining <= 0)
+                and " (storage quota reached)" or ""
+            back("/", nil, "Stored " .. stored .. ", failed: "
+                .. table.concat(failed, ", ") .. reason)
+        end
+        back("/", stored .. (stored == 1 and " file" or " files") .. " uploaded.")
+
+    elseif action == "mkdir" then
+        local folder = current_folder()
+        local _, err = filesm.create_folder(db, user, folder, request.body.name)
+        if err then back("/", nil, err) end
+        back("/", "Folder created.")
+
+    elseif action == "rename_file" then
+        local file = need_file()
+        local _, err = filesm.rename_file(db, user, file, request.body.name)
+        if err then back("/", nil, err) end
+        back("/", "Renamed.")
+
+    elseif action == "move_file" then
+        local file = need_file()
+        local dest = nil
+        if request.body.dest and request.body.dest ~= "" then
+            dest = filesm.get_folder(db, user, request.body.dest)
+            if not dest then back("/", nil, "Target folder not found.") end
+        end
+        local _, err = filesm.move_file(db, user, file, dest)
+        if err then back("/", nil, err) end
+        back("/", "Moved.")
+
+    elseif action == "delete_file" then
+        local file = need_file()
+        filesm.delete_file(db, user, file)
+        back("/", "File deleted.")
+
+    elseif action == "delete_folder" then
+        local folder = filesm.get_folder(db, user, request.body.id)
+        if not folder then back("/", nil, "Folder not found.") end
+        filesm.delete_folder(db, user, folder)
+        back("/", "Folder deleted.")
+
+    elseif action == "share_create" or action == "share_revoke" then
+        -- Shares target either a file or a whole folder.
+        local kind = request.body.kind == "folder" and "folder" or "file"
+        local target = kind == "folder"
+            and filesm.get_folder(db, user, request.body.id)
+            or filesm.get_file(db, user, request.body.id)
+        if not target then back("/", nil, "That item no longer exists.") end
+
+        local message
+        if action == "share_create" then
+            local expires = tonumber(request.body.expires)
+            if expires and expires <= 0 then expires = nil end
+            sharesm.create(db, user, kind, target, expires)
+            message = "Share link created."
+        else
+            sharesm.revoke(db, user, request.body.token or "")
+            message = "Share link revoked."
+        end
+        redirect("/shares.lhtml?" .. kind .. "=" .. target.id
+            .. "&msg=" .. util.urlencode(message))
+
+    elseif action == "approve_user" then
+        if user.is_admin ~= 1 then back("/", nil, "Admins only.") end
+        db:execute("UPDATE users SET approved = 1 WHERE id = ?", { tonumber(request.body.id) or -1 })
+        redirect("/admin.lhtml?msg=" .. util.urlencode("User approved."))
+
+    elseif action == "set_quota" then
+        if user.is_admin ~= 1 then back("/", nil, "Admins only.") end
+        local gib = tonumber(request.body.quota_gib)
+        local bytes = (gib and gib > 0) and math.floor(gib * 1024 * 1024 * 1024) or sqlite.NULL
+        db:execute("UPDATE users SET quota_bytes = ? WHERE id = ?",
+            { bytes, tonumber(request.body.id) or -1 })
+        redirect("/admin.lhtml?msg=" .. util.urlencode("Quota updated."))
+
+    elseif action == "delete_user" then
+        if user.is_admin ~= 1 then back("/", nil, "Admins only.") end
+        local target_id = tonumber(request.body.id) or -1
+        if target_id == user.id then
+            redirect("/admin.lhtml?err=" .. util.urlencode("You cannot delete your own account."))
+        end
+        -- Remove the user's stored bytes first; the DB rows cascade.
+        for _, file in ipairs(db:query("SELECT * FROM files WHERE owner_id = ?", { target_id })) do
+            os.remove(filesm.disk_path(file))
+        end
+        db:execute("DELETE FROM users WHERE id = ?", { target_id })
+        redirect("/admin.lhtml?msg=" .. util.urlencode("User deleted."))
+
+    else
+        back("/", nil, "Unknown action.")
+    end
+?>

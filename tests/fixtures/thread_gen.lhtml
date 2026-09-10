@@ -1,0 +1,12 @@
+<?lua
+-- The generational hazard: a name is reusable, so reading status by name
+-- could answer for a later run. Ids are not reusable, so they cannot.
+local _, id1 = thread.spawn("gen", "jobs/thread_echo.lua", { label = "one", n = 1 })
+local st1, v1 = thread.join(id1, 5)
+local _, id2 = thread.spawn("gen", "jobs/thread_echo.lua", { label = "two", n = 2 })
+local st2, v2 = thread.join(id2, 5)
+print("distinct=" .. tostring(id1 ~= id2)
+   .. " first=" .. tostring(st1) .. "/" .. tostring(v1.got)
+   .. " second=" .. tostring(st2) .. "/" .. tostring(v2.got)
+   .. " first_still=" .. tostring(thread.status(id1)))
+?>
