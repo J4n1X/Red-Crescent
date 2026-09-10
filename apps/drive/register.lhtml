@@ -1,0 +1,49 @@
+<?lua
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local util = require("lib.util")
+
+    local db = dbm.open()
+    if auth.current_user(db) then redirect("/") end
+
+    local error_message = nil
+    if request.method == "POST" then
+        if request.body.password ~= request.body.password2 then
+            error_message = "Passwords do not match."
+        else
+            local first, err = auth.register(db, request.body.username, request.body.password)
+            if err then
+                error_message = err
+            elseif first then
+                redirect("/login.lhtml?msg=" .. util.urlencode(
+                    "Admin account created — you can log in right away."))
+            else
+                redirect("/login.lhtml?msg=" .. util.urlencode(
+                    "Account created. An admin has to approve it before you can log in."))
+            end
+        end
+    end
+
+    page_title = "Register"
+    current_user = nil
+    csrf_html = ""
+?>
+<?lua include("partials/header.lhtml") ?>
+<div class="authbox">
+    <h1>Register</h1>
+    <?lua if error_message then ?>
+        <div class="flash flash-err"><?lua= html_escape(error_message) ?></div>
+    <?lua end ?>
+    <form method="post" action="/register.lhtml">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required autofocus>
+        <label for="password">Password (at least 8 characters)</label>
+        <input type="password" id="password" name="password" required>
+        <label for="password2">Repeat password</label>
+        <input type="password" id="password2" name="password2" required>
+        <button type="submit">Create account</button>
+    </form>
+    <p class="meta">The first account becomes the admin; later accounts need admin approval.</p>
+    <p class="meta">Already registered? <a href="/login.lhtml">Log in</a></p>
+</div>
+<?lua include("partials/footer.lhtml") ?>

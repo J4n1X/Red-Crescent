@@ -1,0 +1,5 @@
+<?lua
+    -- The counterpart: an ordinary file in the serve directory is still
+    -- sendable, so the source rule did not over-block.
+    response.send_file(request.query.serve_dir .. "/assets/style.css")
+?>

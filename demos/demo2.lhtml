@@ -117,7 +117,7 @@
         <div class="card">
             <h2>📋 HTTP Method</h2>
             <div class="success">
-                Request Method: <strong><?lua return request.method ?></strong>
+                Request Method: <strong><?lua= request.method ?></strong>
                 <?lua 
                     local method = request.method
                     local badge_class = "badge-get"
@@ -125,7 +125,7 @@
                     elseif method == "PUT" then badge_class = "badge-put"
                     elseif method == "DELETE" then badge_class = "badge-delete"
                     end
-                    return '<span class="badge ' .. badge_class .. '">' .. method .. '</span>'
+                    print('<span class="badge ' .. badge_class .. '">' .. method .. '</span>')
                 ?>
             </div>
         </div>
@@ -136,11 +136,11 @@
             <table>
                 <tr>
                     <th>Full Path</th>
-                    <td><?lua return request.path ?></td>
+                    <td><?lua= request.path ?></td>
                 </tr>
                 <tr>
                     <th>Path Length</th>
-                    <td><?lua return #request.path ?> characters</td>
+                    <td><?lua= #request.path ?> characters</td>
                 </tr>
             </table>
         </div>
@@ -152,7 +152,7 @@
                 local count = 0
                 for _ in pairs(request.query) do count = count + 1 end
                 if count == 0 then
-                    return '<div class="highlight">No query parameters. Try adding <code>?name=John&age=25</code> to the URL!</div>'
+                    print('<div class="highlight">No query parameters. Try adding <code>?name=John&age=25</code> to the URL!</div>')
                 end
             ?>
             <table>
@@ -165,7 +165,7 @@
                     for key, value in pairs(request.query) do
                         rows = rows .. "<tr><td><code>" .. key .. "</code></td><td>" .. html_escape(value) .. "</td></tr>"
                     end
-                    return rows
+                    print(rows)
                 ?>
             </table>
         </div>
@@ -188,7 +188,7 @@
                     for _, h in ipairs(headers) do
                         rows = rows .. "<tr><td><code>" .. h.name .. "</code></td><td>" .. h.value .. "</td></tr>"
                     end
-                    return rows
+                    print(rows)
                 ?>
             </table>
         </div>
@@ -219,22 +219,22 @@
                 </tr>
                 <tr>
                     <td><code>&lt;script&gt;alert('XSS')&lt;/script&gt;</code></td>
-                    <td><?lua return html_escape("<script>alert('XSS')</script>") ?></td>
+                    <td><?lua= html_escape("<script>alert('XSS')</script>") ?></td>
                 </tr>
                 <tr>
                     <td><code>&lt;img src=x onerror=alert(1)&gt;</code></td>
-                    <td><?lua return html_escape("<img src=x onerror=alert(1)>") ?></td>
+                    <td><?lua= html_escape("<img src=x onerror=alert(1)>") ?></td>
                 </tr>
                 <tr>
                     <td><code>A &amp; B &lt; C &gt; D</code></td>
-                    <td><?lua return html_escape("A & B < C > D") ?></td>
+                    <td><?lua= html_escape("A & B < C > D") ?></td>
                 </tr>
             </table>
             
             <?lua
                 local user_input = request.query.comment or ""
                 if user_input ~= "" then
-                    return '<div class="highlight"><strong>Your comment (safely escaped):</strong><br>' .. html_escape(user_input) .. '</div>'
+                    print('<div class="highlight"><strong>Your comment (safely escaped):</strong><br>' .. html_escape(user_input) .. '</div>')
                 end
             ?>
             
@@ -270,30 +270,27 @@
 
         <!-- Code Examples -->
         <div class="card">
-            <h2>📝 Migration Guide</h2>
-            <h3 style="margin-top: 15px; color: #667eea;">Old API (deprecated):</h3>
-            <pre><code>&lt;?lua
-    local name = request. query["name"]
-    local user_id = request.query["id"]
-?&gt;</code></pre>
-            
-            <h3 style="margin-top: 15px; color: #667eea;">New API (recommended):</h3>
-            <pre><code>&lt;?lua
-    local name = request.query.name
-    local user_id = request.query.id
-    local method = request.method
-    local path = request.path
-    local user_agent = request.headers["user-agent"]
-    
-    -- Use print() for easier output
-    print("Welcome, " .. (name or "Guest") .. "!")
-    
+            <h2>📝 API Cheat Sheet</h2>
+            <pre><code>&lt;!-- Inline expressions --&gt;
+&lt;h1&gt;Hello, &lt;?lua= request.query.name or "Guest" ?&gt;!&lt;/h1&gt;
+
+&lt;?lua
+    local method = request.method              -- any HTTP method
+    local user_agent = request.headers["User-Agent"]  -- case-insensitive
+    local session = request.cookies.session
+    local data = request.body                  -- form or JSON, parsed
+
     -- Escape user input to prevent XSS
-    print("Safe output: " .. html_escape(user_input))
-    
+    print("Safe output: " .. html_escape(request.query.q or ""))
+
     -- Control the response
     response.status = 200
     response.headers["Cache-Control"] = "no-cache"
+    response.set_cookie{ name = "sid", value = "abc", http_only = true }
+
+    -- Or bail out entirely
+    -- redirect("/login.lhtml")
+    -- exit()
 ?&gt;</code></pre>
         </div>
 
@@ -331,21 +328,45 @@
                 </tr>
                 <tr>
                     <td><code>print(...)</code></td>
-                    <td>Easy text output (returns concatenated string)</td>
+                    <td>Easy text output (writes to the page)</td>
                 </tr>
                 <tr>
                     <td><code>html_escape(str)</code></td>
                     <td>Escape HTML to prevent XSS attacks</td>
                 </tr>
+                <tr>
+                    <td><code>request.body</code> / <code>request.raw_body</code></td>
+                    <td>Parsed form/JSON body, or the raw bytes</td>
+                </tr>
+                <tr>
+                    <td><code>request.cookies</code> / <code>response.set_cookie{}</code></td>
+                    <td>Read and set cookies</td>
+                </tr>
+                <tr>
+                    <td><code>json.encode()</code> / <code>json.decode()</code></td>
+                    <td>JSON conversion for building APIs</td>
+                </tr>
+                <tr>
+                    <td><code>include("file.lhtml")</code></td>
+                    <td>Render a partial in place</td>
+                </tr>
+                <tr>
+                    <td><code>require("module")</code></td>
+                    <td>Load a .lua module from the serve directory</td>
+                </tr>
+                <tr>
+                    <td><code>redirect(url)</code> / <code>exit()</code></td>
+                    <td>Redirect or stop rendering early</td>
+                </tr>
             </table>
         </div>
 
         <footer style="text-align: center; color: white; margin-top: 30px; opacity: 0.9;">
-            <p>Built with 🦀 Rust + 🌙 Lua | <?lua return os.date("%Y") ?></p>
+            <p>Built with 🦀 Rust + 🌙 Lua | <?lua= os.date("%Y") ?></p>
             <p style="margin-top: 5px;">
                 <a href="/index.lhtml" style="color: white;">Home</a> •
                 <a href="/demo.lhtml" style="color: white;">Demo</a> •
-                <a href="/request-demo.lhtml" style="color: white;">Request API</a> •
+                <a href="/api.lhtml" style="color: white;">JSON API</a> •
                 <a href="/info.lhtml" style="color: white;">Lua Info</a>
             </p>
         </footer>

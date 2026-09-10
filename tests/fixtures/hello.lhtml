@@ -1,0 +1,1 @@
+<h1>Hello <?lua= request.query.name or "world" ?></h1>

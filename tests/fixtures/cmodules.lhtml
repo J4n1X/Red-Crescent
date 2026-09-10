@@ -1,0 +1,8 @@
+cpath=[<?lua= package.cpath ?>]
+loadlib=<?lua
+-- In mlua's safe mode package.loadlib is a stub that raises SafetyError; in
+-- unsafe mode it is the real function, which returns nil for a missing file
+-- rather than raising. That difference is the observable we assert on.
+local ok = pcall(package.loadlib, "/nonexistent-module.so", "luaopen_nothing")
+print(ok and "callable" or "blocked")
+?>

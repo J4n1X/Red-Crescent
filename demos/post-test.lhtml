@@ -1,6 +1,6 @@
 <?lua
     if request.method == "POST" and tonumber(request.body.responsecode) ~= nil then
-        response.status = request.body.responsecode or response.status
+        response.status = tonumber(request.body.responsecode)
     end
 ?>
 

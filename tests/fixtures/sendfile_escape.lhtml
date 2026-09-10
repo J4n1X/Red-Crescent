@@ -1,0 +1,6 @@
+<?lua
+    local ok, err = pcall(function()
+        response.send_file("/etc/hostname")
+    end)
+    print("blocked=" .. tostring(not ok))
+?>

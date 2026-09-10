@@ -1,0 +1,14 @@
+<?lua
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+
+    local db = dbm.open()
+    if request.method ~= "POST" then redirect("/") end
+
+    local user = auth.current_user(db)
+    if user then
+        auth.check_csrf(user)
+        auth.logout(db)
+    end
+    redirect("/login.lhtml?msg=Logged%20out.")
+?>

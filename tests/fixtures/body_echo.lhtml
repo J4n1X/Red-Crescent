@@ -1,0 +1,1 @@
+<?lua= request.method ?>:<?lua= request.body.msg or "none" ?>:<?lua= request.raw_body or "" ?>

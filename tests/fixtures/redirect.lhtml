@@ -1,0 +1,1 @@
+<?lua redirect("/hello.lhtml") ?>never rendered

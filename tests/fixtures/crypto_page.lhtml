@@ -1,0 +1,13 @@
+<?lua
+    local hash = crypto.password_hash("s3cret")
+    print("argon2=" .. tostring(hash:find("^%$argon2") ~= nil) .. ";")
+    print("verify_ok=" .. tostring(crypto.password_verify("s3cret", hash)) .. ";")
+    print("verify_bad=" .. tostring(crypto.password_verify("wrong", hash)) .. ";")
+    print("verify_garbage=" .. tostring(crypto.password_verify("x", "not-a-hash")) .. ";")
+    local t1, t2 = crypto.random_token(), crypto.random_token(8)
+    print("tok64=" .. #t1 .. ";tok16=" .. #t2 .. ";distinct=" .. tostring(t1 ~= crypto.random_token()) .. ";")
+    print("sha=" .. crypto.sha256("abc") .. ";")
+    print("cte=" .. tostring(crypto.constant_time_equals("abcd", "abcd")) ..
+          "," .. tostring(crypto.constant_time_equals("abcd", "abce")) ..
+          "," .. tostring(crypto.constant_time_equals("ab", "abcd")))
+?>

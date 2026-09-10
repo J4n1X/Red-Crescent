@@ -1,0 +1,30 @@
+<?lua
+    -- Expects globals: page_title (string), current_user (row or nil),
+    -- and csrf_html (string, "" if logged out) — set by the including page.
+?><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><?lua= html_escape(page_title or "Drive") ?> — Drive</title>
+    <link rel="stylesheet" href="/assets/style.css">
+    <script src="/assets/drive.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+    <a class="brand" href="/">🌙 Drive</a>
+    <nav>
+        <?lua if current_user then ?>
+            <?lua if current_user.is_admin == 1 then ?><a href="/admin.lhtml">Admin</a><?lua end ?>
+            <span class="who"><?lua= html_escape(current_user.username) ?></span>
+            <form method="post" action="/logout.lhtml" class="inline">
+                <?lua= csrf_html or "" ?>
+                <button type="submit" class="linklike">Log out</button>
+            </form>
+        <?lua else ?>
+            <a href="/login.lhtml">Log in</a>
+            <a href="/register.lhtml">Register</a>
+        <?lua end ?>
+    </nav>
+</header>
+<main>

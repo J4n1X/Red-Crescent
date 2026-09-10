@@ -1,0 +1,152 @@
+<?lua
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local filesm = require("lib.files")
+    local util = require("lib.util")
+
+    local db = dbm.open()
+    local user = auth.require_login(db)
+
+    local folder = nil
+    if request.query.folder and request.query.folder ~= "" then
+        folder = filesm.get_folder(db, user, request.query.folder)
+        if not folder then redirect("/?err=" .. util.urlencode("Folder not found.")) end
+    end
+
+    local folders, files = filesm.list(db, user, folder)
+    local crumbs = filesm.breadcrumbs(db, user, folder)
+    local all_folders = filesm.all_folders(db, user)
+    local folder_param = folder and tostring(folder.id) or ""
+
+    -- Folder downloads only exist if the host has an archiver.
+    local archiver = require("lib.archive").detect()
+
+    local usage = filesm.usage(db, user)
+    local quota = filesm.quota(db, user)
+
+    page_title = folder and folder.name or "My Files"
+    current_user = user
+    csrf_html = auth.csrf_field(user)
+?>
+<?lua include("partials/header.lhtml") ?>
+
+<?lua= util.flash_html() ?>
+
+<div class="crumbs">
+    <a href="/">My Files</a><?lua for _, crumb in ipairs(crumbs) do ?><span class="sep">/</span><a href="/?folder=<?lua= crumb.id ?>"><?lua= html_escape(crumb.name) ?></a><?lua end ?>
+    <?lua if archiver then ?>
+        <span class="sep">·</span>
+        <a data-archive href="/archive.lhtml?folder=<?lua= folder_param ?>">⬇ Download this folder as <?lua= archiver.ext:upper() ?></a>
+    <?lua end ?>
+</div>
+
+<table class="listing">
+    <tr><th>Name</th><th>Size</th><th>Added</th><th class="actions">Actions</th></tr>
+    <?lua for _, sub in ipairs(folders) do ?>
+        <tr>
+            <td>📁 <a href="/?folder=<?lua= sub.id ?>"><?lua= html_escape(sub.name) ?></a></td>
+            <td class="meta">—</td>
+            <td class="meta"><?lua= util.format_time(sub.created_at) ?></td>
+            <td class="actions">
+                <a href="/shares.lhtml?folder=<?lua= sub.id ?>">Share</a>
+                <?lua if archiver then ?>
+                    <a data-archive href="/archive.lhtml?folder=<?lua= sub.id ?>">Download <?lua= archiver.ext:upper() ?></a>
+                <?lua end ?>
+                <form class="inline" method="post" action="/actions.lhtml"
+                      data-confirm="Delete folder and everything inside it?">
+                    <?lua= csrf_html ?>
+                    <input type="hidden" name="action" value="delete_folder">
+                    <input type="hidden" name="id" value="<?lua= sub.id ?>">
+                    <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+                    <button class="linklike" type="submit">Delete</button>
+                </form>
+            </td>
+        </tr>
+    <?lua end ?>
+    <?lua for _, file in ipairs(files) do ?>
+        <tr>
+            <td>📄 <a href="/download.lhtml?id=<?lua= file.id ?>"><?lua= html_escape(file.name) ?></a></td>
+            <td class="meta"><?lua= util.human_size(file.size) ?></td>
+            <td class="meta"><?lua= util.format_time(file.created_at) ?></td>
+            <td class="actions">
+                <a href="/shares.lhtml?file=<?lua= file.id ?>">Share</a>
+                <details class="tools">
+                    <summary>&nbsp;More ▾</summary>
+                    <form class="rowform" method="post" action="/actions.lhtml">
+                        <?lua= csrf_html ?>
+                        <input type="hidden" name="action" value="rename_file">
+                        <input type="hidden" name="id" value="<?lua= file.id ?>">
+                        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+                        <input type="text" name="name" value="<?lua= html_escape(file.name) ?>">
+                        <button type="submit">Rename</button>
+                    </form>
+                    <form class="rowform" method="post" action="/actions.lhtml">
+                        <?lua= csrf_html ?>
+                        <input type="hidden" name="action" value="move_file">
+                        <input type="hidden" name="id" value="<?lua= file.id ?>">
+                        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+                        <select name="dest">
+                            <option value="">/ (root)</option>
+                            <?lua for _, f in ipairs(all_folders) do ?>
+                                <option value="<?lua= f.id ?>"><?lua= html_escape(f.name) ?></option>
+                            <?lua end ?>
+                        </select>
+                        <button type="submit">Move</button>
+                    </form>
+                    <form class="rowform" method="post" action="/actions.lhtml"
+                          data-confirm="Delete this file?">
+                        <?lua= csrf_html ?>
+                        <input type="hidden" name="action" value="delete_file">
+                        <input type="hidden" name="id" value="<?lua= file.id ?>">
+                        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+                        <button class="danger" type="submit">Delete</button>
+                    </form>
+                </details>
+            </td>
+        </tr>
+    <?lua end ?>
+    <?lua if #folders == 0 and #files == 0 then ?>
+        <tr><td colspan="4" class="meta">Nothing here yet — upload something!</td></tr>
+    <?lua end ?>
+</table>
+
+<div class="panel">
+    <h2>Upload</h2>
+    <form class="rowform" method="post" action="/actions.lhtml" enctype="multipart/form-data"
+          data-upload data-max-size="<?lua= util.human_size(server.max_upload_size) ?>">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="upload">
+        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+        <input type="file" name="file" multiple required>
+        <button type="submit">Upload files</button>
+    </form>
+    <form class="rowform" method="post" action="/actions.lhtml" enctype="multipart/form-data"
+          data-upload data-max-size="<?lua= util.human_size(server.max_upload_size) ?>">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="upload">
+        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+        <input type="file" name="file" webkitdirectory multiple required>
+        <button type="submit">Upload a folder</button>
+    </form>
+    <p class="meta">Folder uploads recreate the folder structure here. Browsers that submit
+    only plain filenames instead of relative paths will land the files in the current folder.</p>
+    <p class="meta">One upload may total at most <strong><?lua= util.human_size(server.max_upload_size) ?></strong>
+    across at most <strong><?lua= server.max_upload_files ?></strong> files. Larger folders
+    need to go up in batches — the server rejects the whole request otherwise.</p>
+    <p class="meta">Using <strong><?lua= util.human_size(usage) ?></strong><?lua
+        if quota then ?> of <strong><?lua= util.human_size(quota) ?></strong>
+        (<?lua= math.floor(usage / quota * 100) ?>%)<?lua end ?>.</p>
+</div>
+
+<div class="panel">
+    <h2>New folder</h2>
+    <form class="rowform" method="post" action="/actions.lhtml">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="mkdir">
+        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+        <input type="text" name="name" placeholder="Folder name" required>
+        <button type="submit">Create</button>
+    </form>
+</div>
+
+<?lua include("partials/footer.lhtml") ?>

@@ -1,0 +1,36 @@
+<?lua
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local util = require("lib.util")
+
+    local db = dbm.open()
+    if auth.current_user(db) then redirect("/") end
+
+    local error_message = nil
+    if request.method == "POST" then
+        local user, err = auth.login(db, request.body.username, request.body.password)
+        if user then redirect("/") end
+        error_message = err
+    end
+
+    page_title = "Log in"
+    current_user = nil
+    csrf_html = ""
+?>
+<?lua include("partials/header.lhtml") ?>
+<div class="authbox">
+    <h1>Log in</h1>
+    <?lua= util.flash_html() ?>
+    <?lua if error_message then ?>
+        <div class="flash flash-err"><?lua= html_escape(error_message) ?></div>
+    <?lua end ?>
+    <form method="post" action="/login.lhtml">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required autofocus>
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required>
+        <button type="submit">Log in</button>
+    </form>
+    <p class="meta">No account? <a href="/register.lhtml">Register</a></p>
+</div>
+<?lua include("partials/footer.lhtml") ?>

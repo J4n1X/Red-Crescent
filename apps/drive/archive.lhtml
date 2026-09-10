@@ -1,0 +1,127 @@
+<?lua
+    -- Folder downloads: enqueue, watch, then collect.
+    --
+    --   ?folder=N            enqueue (or join an in-flight job) and watch it
+    --   ?job=N               watch an existing job
+    --   ?...&json=1          the same, as JSON, for the polling script
+    --   ?job=N&fetch=1       hand over the finished archive
+    --
+    -- jobs/archive.lua does the building. Nothing here blocks on it: a request
+    -- that waited would hold an upstream connection for minutes.
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local filesm = require("lib.files")
+    local archive = require("lib.archive")
+    local util = require("lib.util")
+
+    local db = dbm.open()
+    local user = auth.require_login(db)
+
+    local wants_json = request.query.json == "1"
+
+    local function reply_json(payload)
+        response.headers["Content-Type"] = "application/json"
+        response.headers["Cache-Control"] = "no-store"
+        print(json.encode(payload))
+        exit()
+    end
+
+    local function give_up(message, folder_id)
+        if wants_json then reply_json({ status = "failed", error = message }) end
+        local back = (folder_id and folder_id ~= "") and ("/?folder=" .. folder_id) or "/"
+        local sep = back:find("?", 1, true) and "&" or "?"
+        redirect(back .. sep .. "err=" .. util.urlencode(message))
+    end
+
+    -- --- find or create the job -----------------------------------------
+    local job
+    if request.query.job and request.query.job ~= "" then
+        job = archive.get_job(db, user, request.query.job)
+        if not job then
+            -- Same answer as "belongs to someone else", so ids cannot be probed.
+            if wants_json then reply_json({ status = "missing" }) end
+            response.status = 404
+            print("404 Not Found")
+            exit()
+        end
+    else
+        local folder = nil
+        if request.query.folder and request.query.folder ~= "" then
+            folder = filesm.get_folder(db, user, request.query.folder)
+            if not folder then give_up("Folder not found.", nil) end
+        end
+        if not archive.detect() then
+            give_up("No archiver is installed on the server.", request.query.folder)
+        end
+        job = archive.enqueue(db, user, folder)
+    end
+
+    -- Every poll is also a nudge: nothing else starts a task, restarts one
+    -- lost to a restart, or claims a slot as it frees.
+    job = archive.ensure_running(db, job)
+
+    local watch_url = "/archive.lhtml?job=" .. job.id
+
+    -- --- hand over a finished archive -----------------------------------
+    if request.query.fetch == "1" then
+        if job.status ~= "ready" then redirect(watch_url) end
+        response.send_file(job.path, {
+            download_name = job.filename,
+            content_type = job.content_type,
+        })
+        exit()
+    end
+
+    if wants_json then
+        local payload = {
+            job = job.id,
+            status = job.status,
+            error = job.error,
+            fetch = (job.status == "ready") and (watch_url .. "&fetch=1") or nil,
+        }
+        -- Two queries, and only meaningful while waiting.
+        if job.status == "queued" then
+            payload.running, payload.waiting = archive.queue_stats(db, job.id)
+        end
+        reply_json(payload)
+    end
+
+    -- --- no-JavaScript path ---------------------------------------------
+    if job.status == "ready" then redirect(watch_url .. "&fetch=1") end
+    if job.status == "failed" then
+        give_up("Could not build the archive: " .. tostring(job.error), nil)
+    end
+
+    -- A Refresh header, since the head comes from the shared partial.
+    response.headers["Refresh"] = "2; url=" .. watch_url
+    response.headers["Cache-Control"] = "no-store"
+
+    page_title = "Preparing your archive"
+    current_user = user
+    csrf_html = ""
+?>
+<?lua include("partials/header.lhtml") ?>
+<?lua
+    local running, waiting = 0, 0
+    if job.status == "queued" then running, waiting = archive.queue_stats(db, job.id) end
+?>
+<div class="panel">
+    <h2>Preparing your archive…</h2>
+    <?lua if job.status == "building" then ?>
+        <p>Compressing your folder now. This page checks every couple of seconds and starts
+        the download on its own.</p>
+    <?lua elseif running > 0 then ?>
+        <p>Your archive is <strong>queued</strong>. The server builds
+        <?lua= archive.MAX_CONCURRENT ?> at a time and
+        <?lua= running ?> <?lua= running == 1 and "is" or "are" ?> already running<?lua
+            if waiting > 0 then ?>, with <?lua= waiting ?> other<?lua= waiting == 1 and "" or "s" ?>
+            waiting<?lua end ?>. It starts as soon as a slot frees, and the download
+        begins on its own.</p>
+    <?lua else ?>
+        <p>Your archive is queued and starts in a moment. This page checks every couple of
+        seconds and begins the download on its own.</p>
+    <?lua end ?>
+    <p class="meta">You can leave this page open and keep working elsewhere. Nothing is lost if
+    you close it — reopening the folder download picks the same archive back up.</p>
+</div>
+<?lua include("partials/footer.lhtml") ?>

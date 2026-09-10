@@ -1,0 +1,8 @@
+<nav style="display:flex;gap:1rem;padding:1rem;background:#1a1a2e;border-radius:8px;margin-bottom:1.5rem">
+    <a href="/" style="color:#64ffda">Home</a>
+    <a href="/demo.lhtml" style="color:#64ffda">Demo</a>
+    <a href="/demo2.lhtml" style="color:#64ffda">Request API</a>
+    <a href="/api.lhtml" style="color:#64ffda">JSON API</a>
+    <a href="/post-test.lhtml" style="color:#64ffda">POST Test</a>
+    <a href="/info.lhtml" style="color:#64ffda">Lua Info</a>
+</nav>

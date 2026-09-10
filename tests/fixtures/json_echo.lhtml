@@ -1,0 +1,4 @@
+<?lua
+    response.headers["Content-Type"] = "application/json"
+    print(json.encode({ user = request.body.user, ok = true }))
+?>

@@ -80,8 +80,8 @@
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-            background: <?lua return current_theme.bg ?>;
-            color: <?lua return current_theme.text ?>;
+            background: <?lua= current_theme.bg ?>;
+            color: <?lua= current_theme.text ?>;
             min-height: 100vh;
             padding: 20px;
             line-height: 1.6;
@@ -91,7 +91,7 @@
             margin: 0 auto;
         }
         header {
-            background: <?lua return current_theme.header_bg ?>;
+            background: <?lua= current_theme.header_bg ?>;
             color: white;
             padding: 40px;
             border-radius: 16px;
@@ -108,17 +108,17 @@
             font-size: 1.1em;
         }
         .card {
-            background: <?lua return current_theme.card_bg ?>;
+            background: <?lua= current_theme.card_bg ?>;
             border-radius: 12px;
             padding: 25px;
             margin-bottom: 20px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.1);
         }
         .card h2 {
-            color: <?lua return current_theme.accent ?>;
+            color: <?lua= current_theme.accent ?>;
             margin-bottom: 15px;
             padding-bottom: 10px;
-            border-bottom: 2px solid <?lua return current_theme.accent ?>;
+            border-bottom: 2px solid <?lua= current_theme.accent ?>;
         }
         .grid {
             display: grid;
@@ -126,16 +126,16 @@
             gap: 20px;
         }
         .stat-box {
-            background: <?lua return current_theme.card_bg ?>;
+            background: <?lua= current_theme.card_bg ?>;
             padding: 20px;
             border-radius: 10px;
             text-align: center;
-            border-left: 4px solid <?lua return current_theme.accent ?>;
+            border-left: 4px solid <?lua= current_theme.accent ?>;
         }
         .stat-box .number {
             font-size: 2.5em;
             font-weight: bold;
-            color: <?lua return current_theme.accent ?>;
+            color: <?lua= current_theme.accent ?>;
         }
         .stat-box .label {
             opacity: 0.8;
@@ -151,7 +151,7 @@
             border-bottom: 1px solid rgba(128,128,128,0.3);
         }
         th {
-            color: <?lua return current_theme.accent ?>;
+            color: <?lua= current_theme.accent ?>;
             font-weight: 600;
         }
         code {
@@ -162,7 +162,7 @@
         }
         .tag {
             display: inline-block;
-            background: <?lua return current_theme.accent ?>;
+            background: <?lua= current_theme.accent ?>;
             color: white;
             padding: 4px 12px;
             border-radius: 20px;
@@ -188,7 +188,7 @@
             background: rgba(255,255,255,0.3);
         }
         .fact-box {
-            background: <?lua return current_theme.header_bg ?>;
+            background: <?lua= current_theme.header_bg ?>;
             color: white;
             padding: 20px;
             border-radius: 10px;
@@ -213,7 +213,7 @@
             content: "→";
             position: absolute;
             left: 0;
-            color: <?lua return current_theme.accent ?>;
+            color: <?lua= current_theme.accent ?>;
         }
         .interactive-form {
             display: flex;
@@ -224,15 +224,15 @@
             flex: 1;
             min-width: 200px;
             padding: 10px 15px;
-            border: 2px solid <?lua return current_theme.accent ?>;
+            border: 2px solid <?lua= current_theme.accent ?>;
             border-radius: 8px;
             background: transparent;
-            color: <?lua return current_theme.text ?>;
+            color: <?lua= current_theme.text ?>;
             font-size: 1em;
         }
         .interactive-form button {
             padding: 10px 25px;
-            background: <?lua return current_theme.accent ?>;
+            background: <?lua= current_theme.accent ?>;
             color: white;
             border: none;
             border-radius: 8px;
@@ -249,7 +249,7 @@
             gap: 8px;
         }
         .fibonacci span {
-            background: <?lua return current_theme.accent ?>;
+            background: <?lua= current_theme.accent ?>;
             color: white;
             padding: 8px 14px;
             border-radius: 8px;
@@ -265,19 +265,15 @@
 <body>
     <div class="container">
         <header>
-            <h1>🌙 Welcome, <?lua return visitor_name ?>!</h1>
+            <h1>🌙 Welcome, <?lua= visitor_name ?>!</h1>
             <p>This is a demo of the Lua HTML Renderer - PHP-like templating with Lua</p>
             <div class="theme-switcher">
                 <?lua
-                    local links = ""
-                    local theme_names = {"light", "dark", "ocean", "forest"}
-                    for _, t in ipairs(theme_names) do
-                        local name_param = request.query["name"] and ("&name=" .. request.query["name"]) or ""
+                    -- Control structures span blocks now, so the loop can wrap plain HTML
+                    local name_param = request.query.name and ("&name=" .. request.query.name) or ""
+                    for _, t in ipairs({"light", "dark", "ocean", "forest"}) do
                         local active = (t == theme) and " style='background:rgba(0,0,0,0.3)'" or ""
-                        links = links .. '<a href="?theme=' .. t .. name_param .. '"' .. active .. '>' .. t:gsub("^%l", string.upper) .. '</a>'
-                    end
-                    return links
-                ?>
+                ?><a href="?theme=<?lua= t ?><?lua= name_param ?>"<?lua= active ?>><?lua= t:gsub("^%l", string.upper) ?></a><?lua end ?>
             </div>
         </header>
 
@@ -285,8 +281,8 @@
         <div class="card">
             <h2>👋 Personalize Your Visit</h2>
             <form class="interactive-form" method="get">
-                <input type="hidden" name="theme" value="<?lua return theme ?>">
-                <input type="text" name="name" placeholder="Enter your name..." value="<?lua return request.query["name"] or "" ?>">
+                <input type="hidden" name="theme" value="<?lua= theme ?>">
+                <input type="text" name="name" placeholder="Enter your name..." value="<?lua= request.query["name"] or "" ?>">
                 <button type="submit">Say Hello!</button>
             </form>
         </div>
@@ -294,19 +290,19 @@
         <!-- Stats Grid -->
         <div class="grid">
             <div class="stat-box">
-                <div class="number"><?lua return lucky_number ?></div>
+                <div class="number"><?lua= lucky_number ?></div>
                 <div class="label">Your Lucky Number</div>
             </div>
             <div class="stat-box">
-                <div class="number"><?lua return os.date("%H:%M") ?></div>
+                <div class="number"><?lua= os.date("%H:%M") ?></div>
                 <div class="label">Current Time</div>
             </div>
             <div class="stat-box">
-                <div class="number"><?lua return os.date("%A") ?></div>
+                <div class="number"><?lua= os.date("%A") ?></div>
                 <div class="label">Day of Week</div>
             </div>
             <div class="stat-box">
-                <div class="number"><?lua return _VERSION:match("%d+%.%d+") ?></div>
+                <div class="number"><?lua= _VERSION:match("%d+%.%d+") ?></div>
                 <div class="label">Lua Version</div>
             </div>
         </div>
@@ -315,10 +311,10 @@
         <div class="card">
             <h2>🎲 Random Lua Fact</h2>
             <div class="fact-box">
-                <?lua return random_fact ?>
+                <?lua= random_fact ?>
             </div>
             <p style="margin-top: 15px; opacity: 0.7; text-align: center;">
-                <a href="?theme=<?lua return theme ?><?lua return request.query["name"] and ("&name=" .. request.query["name"]) or "" ?>" style="color: <?lua return current_theme.accent ?>;">
+                <a href="?theme=<?lua= theme ?><?lua= request.query["name"] and ("&name=" .. request.query["name"]) or "" ?>" style="color: <?lua= current_theme.accent ?>;">
                     🔄 Refresh for another fact
                 </a>
             </p>
@@ -338,14 +334,8 @@
                         end
                         return result
                     end
-                    
-                    local sequence = fib(15)
-                    local html = ""
-                    for i, num in ipairs(sequence) do
-                        html = html .. "<span>" .. num .. "</span>"
-                    end
-                    return html
-                ?>
+
+                    for _, num in ipairs(fib(15)) do ?><span><?lua= num ?></span><?lua end ?>
             </div>
         </div>
 
@@ -382,7 +372,7 @@
                 end
                 
                 html = html .. "</tr></table>"
-                return html
+                print(html)
             ?>
         </div>
 
@@ -404,7 +394,7 @@
                     if not has_params then
                         html = '<tr><td colspan="2" style="text-align:center;opacity:0.6">No query parameters - try adding ?name=YourName to the URL!</td></tr>'
                     end
-                    return html
+                    print(html)
                 ?>
             </table>
         </div>
@@ -430,7 +420,7 @@
                             html = html .. "<span>" .. i .. "</span>"
                         end
                     end
-                    return html
+                    print(html)
                 ?>
             </div>
         </div>
@@ -440,7 +430,7 @@
             <h2>⚡ What You Can Do</h2>
             <div class="grid">
                 <div>
-                    <h3 style="color: <?lua return current_theme.accent ?>; margin-bottom: 10px;">Lua Features</h3>
+                    <h3 style="color: <?lua= current_theme.accent ?>; margin-bottom: 10px;">Lua Features</h3>
                     <ul>
                         <li>Variables & Tables</li>
                         <li>Functions & Closures</li>
@@ -451,14 +441,15 @@
                     </ul>
                 </div>
                 <div>
-                    <h3 style="color: <?lua return current_theme.accent ?>; margin-bottom: 10px;">Runtime Features</h3>
+                    <h3 style="color: <?lua= current_theme.accent ?>; margin-bottom: 10px;">Runtime Features</h3>
                     <ul>
-                        <li><code>query</code> - URL parameters</li>
-                        <li><code>log.info()</code> - Server logging</li>
-                        <li><code>log.debug()</code> - Debug logging</li>
-                        <li><code>log.warn()</code> - Warning logging</li>
-                        <li><code>log.error()</code> - Error logging</li>
-                        <li><code>return</code> - Output to page</li>
+                        <li><code>&lt;?lua= expr ?&gt;</code> - Inline output</li>
+                        <li><code>request</code> - Query, headers, body, cookies</li>
+                        <li><code>response</code> - Status, headers, cookies</li>
+                        <li><code>json</code> - encode/decode</li>
+                        <li><code>include()</code> / <code>require()</code> - Partials &amp; modules</li>
+                        <li><code>redirect()</code> / <code>exit()</code> - Control flow</li>
+                        <li><code>log.info()</code> etc. - Server logging</li>
                     </ul>
                 </div>
             </div>
@@ -474,27 +465,27 @@
                 </tr>
                 <tr>
                     <td>Lua Version</td>
-                    <td><?lua return _VERSION ?></td>
+                    <td><?lua= _VERSION ?></td>
                 </tr>
                 <tr>
                     <td>Page Generated At</td>
-                    <td><?lua return page_load_time ?></td>
+                    <td><?lua= page_load_time ?></td>
                 </tr>
                 <tr>
                     <td>Unix Timestamp</td>
-                    <td><?lua return os.time() ?></td>
+                    <td><?lua= os.time() ?></td>
                 </tr>
                 <tr>
                     <td>Memory Usage</td>
-                    <td><?lua collectgarbage("collect"); return string.format("%.2f KB", collectgarbage("count")) ?></td>
+                    <td><?lua collectgarbage("collect") print(string.format("%.2f KB", collectgarbage("count"))) ?></td>
                 </tr>
                 <tr>
                     <td>Random Seed Used</td>
-                    <td><?lua return random_seed ?></td>
+                    <td><?lua= random_seed ?></td>
                 </tr>
                 <tr>
                     <td>Current Theme</td>
-                    <td><span class="tag"><?lua return theme ?></span></td>
+                    <td><span class="tag"><?lua= theme ?></span></td>
                 </tr>
             </table>
         </div>
@@ -503,26 +494,22 @@
         <div class="card">
             <h2>📝 How It Works</h2>
             <p style="margin-bottom: 15px;">Embed Lua code in your HTML using <code>&lt;?lua ... ?&gt;</code> tags:</p>
-            <pre style="background: rgba(128,128,128,0.2); padding: 15px; border-radius: 8px; overflow-x: auto;"><code>&lt;h1&gt;&lt;?lua return "Hello, " .. visitor_name .. "!" ?&gt;&lt;/h1&gt;
+            <pre style="background: rgba(128,128,128,0.2); padding: 15px; border-radius: 8px; overflow-x: auto;"><code>&lt;h1&gt;Hello, &lt;?lua= visitor_name ?&gt;!&lt;/h1&gt;
 
-&lt;?lua
-    -- Multi-line Lua blocks work too!
-    local items = {"Apple", "Banana", "Cherry"}
-    local html = "&lt;ul&gt;"
-    for _, item in ipairs(items) do
-        html = html .. "&lt;li&gt;" .. item .. "&lt;/li&gt;"
-    end
-    html = html .. "&lt;/ul&gt;"
-    return html
-?&gt;</code></pre>
+&lt;!-- Control structures can span blocks, like PHP: --&gt;
+&lt;ul&gt;
+    &lt;?lua for _, item in ipairs({"Apple", "Banana", "Cherry"}) do ?&gt;
+        &lt;li&gt;&lt;?lua= item ?&gt;&lt;/li&gt;
+    &lt;?lua end ?&gt;
+&lt;/ul&gt;</code></pre>
         </div>
 
         <footer>
-            <p>Built with 🦀 Rust + 🌙 Lua | <?lua return os.date("%Y") ?></p>
+            <p>Built with 🦀 Rust + 🌙 Lua | <?lua= os.date("%Y") ?></p>
             <p style="margin-top: 5px;">
-                <a href="/index.lhtml" style="color: <?lua return current_theme.accent ?>;">Home</a> •
-                <a href="/info.lhtml" style="color: <?lua return current_theme.accent ?>;">Lua Info</a> •
-                <a href="/demo.lhtml" style="color: <?lua return current_theme.accent ?>;">Demo</a>
+                <a href="/index.lhtml" style="color: <?lua= current_theme.accent ?>;">Home</a> •
+                <a href="/info.lhtml" style="color: <?lua= current_theme.accent ?>;">Lua Info</a> •
+                <a href="/demo.lhtml" style="color: <?lua= current_theme.accent ?>;">Demo</a>
             </p>
         </footer>
     </div>
