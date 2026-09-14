@@ -28,6 +28,7 @@ mlua = { version = "0.11.5", features = ["lua54", "serde", "vendored"] }
 percent-encoding = "2"
 pretty_env_logger = "0.5.0"
 rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.149"
 serde_urlencoded = "0.7"
 sha2 = "0.10"
@@ -43,10 +44,8 @@ strip = "debuginfo"
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
 
 [profile.release]
 strip = "debuginfo"
 opt-level = 3
 lto = true
-panic = "abort"

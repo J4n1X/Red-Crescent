@@ -4,6 +4,8 @@
 //! through prepared-statement binding, so templates get injection-safe SQL
 //! by construction.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -11,7 +13,7 @@ use mlua::{LightUserData, Lua, Table, UserData, UserDataMethods, Value};
 use rusqlite::Connection;
 use rusqlite::types::Value as SqlValue;
 
-pub fn register(lua: &Lua, data_dir: &Path) -> mlua::Result<()> {
+pub fn register(lua: &Lua, data_dir: &Path, idle_limit: usize) -> mlua::Result<()> {
     let sqlite = lua.create_table()?;
 
     let dir = data_dir.to_path_buf();
@@ -19,12 +21,12 @@ pub fn register(lua: &Lua, data_dir: &Path) -> mlua::Result<()> {
         "open",
         lua.create_function(move |_, relpath: String| {
             let path = resolve_db_path(&dir, &relpath)?;
-            let conn = Connection::open(&path).map_err(mlua::Error::external)?;
-            conn.pragma_update(None, "journal_mode", "WAL")
-                .map_err(mlua::Error::external)?;
-            conn.busy_timeout(Duration::from_secs(5))
-                .map_err(mlua::Error::external)?;
-            Ok(LuaConnection(Some(conn)))
+            let conn = checkout(&path).map_err(mlua::Error::external)?;
+            Ok(LuaConnection {
+                conn: Some(conn),
+                path,
+                idle_limit,
+            })
         })?,
     )?;
 
@@ -67,13 +69,87 @@ fn resolve_db_path(data_dir: &Path, relpath: &str) -> mlua::Result<PathBuf> {
     Ok(path)
 }
 
-struct LuaConnection(Option<Connection>);
+thread_local! {
+    /// Connections parked by a finished request, keyed by database path.
+    ///
+    /// SQLite opens lazily, so the first statement on a new connection pays
+    /// ~220us for the file open and schema load against 0.7us on a warm one.
+    /// Thread-local because `web::block` already runs on a long-lived pool, so
+    /// no mutex or checkout protocol is needed. A database is shared between
+    /// requests by definition, so this weakens no isolation guarantee.
+    static IDLE: RefCell<HashMap<PathBuf, Vec<Connection>>> = RefCell::new(HashMap::new());
+}
+
+/// Take a parked connection, or open a fresh one. `journal_mode` is persistent
+/// and `busy_timeout` is per-connection, so a reused one needs neither.
+fn checkout(path: &Path) -> rusqlite::Result<Connection> {
+    let parked = IDLE.with(|idle| {
+        idle.borrow_mut()
+            .get_mut(path)
+            .and_then(|conns| conns.pop())
+    });
+    if let Some(conn) = parked {
+        return Ok(conn);
+    }
+    let conn = Connection::open(path)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    Ok(conn)
+}
+
+/// Park a connection for the next request, or drop it if it cannot be handed
+/// on cleanly. Anything unexpected drops it; the next open just pays in full.
+fn checkin(path: &Path, conn: Connection, limit: usize) {
+    if limit == 0 {
+        return;
+    }
+    // An aborted transaction would hand the next request an open write lock.
+    if !conn.is_autocommit() && conn.execute_batch("ROLLBACK").is_err() {
+        return;
+    }
+    // Temp tables live on the connection; discard rather than enumerate them.
+    match conn.query_row("SELECT count(*) FROM sqlite_temp_master", [], |r| {
+        r.get::<_, i64>(0)
+    }) {
+        Ok(0) => {}
+        _ => return,
+    }
+    // Off on a fresh connection, so reset it rather than inherit last request's.
+    if conn.execute_batch("PRAGMA foreign_keys = OFF").is_err() {
+        return;
+    }
+    IDLE.with(|idle| {
+        let mut idle = idle.borrow_mut();
+        let conns = idle.entry(path.to_path_buf()).or_default();
+        if conns.len() < limit {
+            conns.push(conn);
+        }
+    });
+}
+
+struct LuaConnection {
+    conn: Option<Connection>,
+    path: PathBuf,
+    idle_limit: usize,
+}
 
 impl LuaConnection {
     fn get(&self) -> mlua::Result<&Connection> {
-        self.0
+        self.conn
             .as_ref()
             .ok_or_else(|| mlua::Error::runtime("attempt to use a closed sqlite connection"))
+    }
+
+    fn release(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            checkin(&self.path, conn, self.idle_limit);
+        }
+    }
+}
+
+impl Drop for LuaConnection {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -120,7 +196,7 @@ impl UserData for LuaConnection {
         );
 
         methods.add_method_mut("close", |_, this, ()| {
-            this.0.take();
+            this.release();
             Ok(())
         });
     }

@@ -21,6 +21,10 @@ return {
 
     -- Threads have their own limits, so the jobs above are not bound by it.
     thread_memory_limit_mb = 64,
+    
+    -- Idle SQLite connections that can be reused. 
+    -- That removes some overhead from opening connections.
+    sqlite_idle_connections = 8,
 
     -- Housekeeping runs from boot rather than waiting for the first request.
     threads = { "jobs/cleanup.lua" },

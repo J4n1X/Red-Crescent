@@ -1,0 +1,12 @@
+<?lua
+local db = sqlite.open("leak/t.db")
+db:execute("CREATE TABLE IF NOT EXISTS t (n INTEGER)")
+if request.query.mode == "leak" then
+    -- Ends the request inside an open transaction on purpose.
+    db:execute("BEGIN")
+    db:execute("INSERT INTO t VALUES (1)")
+    print("left-open")
+else
+    print("count=" .. db:query("SELECT COUNT(*) AS n FROM t")[1].n)
+end
+?>

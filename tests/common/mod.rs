@@ -39,6 +39,7 @@ pub fn test_config(serve_dir: &str) -> Config {
         // unless a test asks for one.
         thread_timeout_ms: None,
         thread_memory_limit_mb: 8,
+        sqlite_idle_connections: 2,
         static_files: true,
         index: "index.lhtml".to_string(),
         dev: false,
@@ -71,6 +72,7 @@ pub async fn app_with(
         max_upload_size: config.max_upload_size,
         max_upload_files: config.max_upload_files,
         threads: Arc::new(ThreadRegistry::new()),
+        sqlite_idle_connections: config.sqlite_idle_connections,
         thread_limits: ThreadLimits {
             timeout: config
                 .thread_timeout_ms

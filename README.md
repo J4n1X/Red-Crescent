@@ -92,6 +92,7 @@ All options as flags and environment variables (`--help` for the full list):
 | `--thread` | `RC_THREADS` | — | Background Lua thread script spawned at boot, repeatable |
 | `--thread-timeout-ms` | `RC_THREAD_TIMEOUT_MS` | — | Deadline for one awake stretch of a thread; unset or `0` means none |
 | `--thread-memory-limit-mb` | `RC_THREAD_MEMORY_LIMIT_MB` | `256` | Lua memory limit for a background thread instance |
+| `--sqlite-idle-connections` | `RC_SQLITE_IDLE_CONNECTIONS` | `2` | Warm SQLite connections kept per database, per worker thread; `0` disables reuse |
 | `--c-module-dir` | `RC_C_MODULE_DIRS` | — | Directory of native `.so` Lua modules `require` may load, repeatable (off by default; needs a `--features c-modules` build) |
 | `--static-files` | `RC_STATIC_FILES` | `true` | Serve non-`.lhtml` files |
 | `--index` | `RC_INDEX` | `index.lhtml` | File served for `/` and directories |
@@ -222,7 +223,16 @@ db:close()                                 -- optional; closes with the request 
 ```
 
 Parameters always go through prepared-statement binding — string concatenation into SQL is
-never needed, so injection is off the table. To bind SQL `NULL` use `sqlite.NULL`
+never needed, so injection is off the table.
+
+**Connections are reused between requests.** SQLite opens lazily, so the first statement on a new
+connection pays for the file open and schema load — around 220µs, against 0.7µs on a warm one. A
+finished request parks its connection for the next one on the same worker thread, which measured
+as roughly a 1ms saving on a 5ms Drive page. A connection is parked only if it can be handed on
+cleanly: an open transaction is rolled back, `foreign_keys` is reset to its fresh-connection
+default, and a connection carrying temp tables is discarded rather than reused. `db:close()`
+parks it early. This shares no more than the database already shares — set
+`--sqlite-idle-connections 0` to go back to a fresh connection every time. To bind SQL `NULL` use `sqlite.NULL`
 (`{ id, folder or sqlite.NULL }`) — a bare `nil` would truncate the Lua array.
 
 ### Crypto

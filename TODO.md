@@ -7,6 +7,9 @@ throttling, per-user storage quotas, the blunt TLS warning in the README, a back
 separate limits for background threads (`--thread-timeout-ms` / `--thread-memory-limit-mb`), and
 a real thread model — arguments, run ids, `thread.status`, `thread.join`, `thread.id` and
 `thread.kill` — and Drive's archive worker, which retired the synchronous build.
+`panic = "abort"` is gone from both
+profiles, and SQLite connections are now reused between requests
+(`--sqlite-idle-connections`, default 2), worth about 1ms on a 5ms Drive page.
 What remains:
 
 Things deliberately deferred, with enough context to pick them up cold. Roughly ordered by
@@ -126,6 +129,16 @@ checking they don't work against each other.
 
 ## Drive
 
+### The file listing is 2.2 KB of HTML per row
+A 1000-file listing renders 2.2 MB and takes 24ms; 5000 files is 11 MB and 65ms. Each row carries
+a `<details>` block containing rename and move forms, and the move form has a `<select>` listing
+*every* folder the user owns -- so the markup is roughly quadratic in folders and linear in files
+on top of that.
+
+Worth more than every runtime optimisation on this list combined. The fix is to stop emitting
+per-row forms: one shared dialog populated on demand, or a row action that navigates rather than
+inlining the whole form. Neither needs platform work.
+
 ### No POSIX metadata is preserved
 Uploads come back with the upload time and default permissions — Drive stores bytes only.
 Harmless for documents, wrong for anything executable. Decide whether `files` should carry
@@ -141,3 +154,30 @@ never reaches the server and is missing from a round-tripped tree. Only fixable 
 ### Monitoring
 Nothing watches whether the service is up or the certificate renewed. `systemd` restarts a
 crash, and certbot's timer renews, but neither tells you when it stopped working.
+
+## Settled, with numbers
+
+Recorded so these are not reopened from intuition.
+
+**Lua backend: stay on lua54.** LuaJIT builds and runs the whole codebase unchanged (no 5.4-only
+syntax is used anywhere), but on real Drive listings it is 6.71ms vs 5.54 at 10 files, 17.78 vs
+6.85 at 100, 22.13 vs 24.22 at 1000, and 75.27 vs 65.13 at 5000 -- no win. Microbenchmarks say
+LuaJIT wins on loops past ~1000 iterations and is 16x faster on hot arithmetic, but a real request
+is SQLite, `gsub` and buffer writes, all of which are C. The interpreter is not the bottleneck.
+
+Luau and luau-jit are out on both counts: `set_global_hook` is `#[cfg(not(feature = "luau"))]` and
+this code uses it in three places, `StdLib::IO` and `StdLib::PACKAGE` do not exist there against 58
+`require(` calls, and luau-jit measured 5.1x lua54's VM creation for no warm gain on untyped code.
+
+**VM pooling: no.** Creation is 55us against an 8.2ms request -- 0.7% -- and reuse would convert
+"no state can leak between requests" from a structural guarantee into a discipline. A pooled VM
+staying JIT-warm is the only real argument for it, and the numbers above remove that argument.
+
+**Cold VM creation, for reference:** lua54 55us, luajit 79us, luau 104us, luau-jit 283us. Template
+parsing is 46-90us cold but 1.6us on a cache hit, which is why there is nothing to overlap it with.
+
+**SQLite connection reuse: done, measured.** Parking a connection for the next request on the
+same worker thread took a 50-file Drive listing from a 5.413ms median to 4.425ms, and 4.129 to
+3.581 on a second alternating run, with a tighter p75 both times. A connection is parked only if
+it can be handed on cleanly -- open transaction rolled back, `foreign_keys` reset, temp tables
+mean discard. The rollback is covered by a test that was checked to fail without it.
