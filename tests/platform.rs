@@ -500,6 +500,39 @@ async fn c_module_dirs_enable_native_loading() {
 }
 
 #[actix_web::test]
+async fn a_bad_fallback_is_a_startup_error() {
+    let serve_dir = std::path::PathBuf::from("tests/fixtures")
+        .canonicalize()
+        .unwrap();
+
+    let err = red_crescent::resolve_fallback(Some("nope.lhtml"), &serve_dir).unwrap_err();
+    assert!(err.contains("not found"), "error: {err}");
+
+    // A static file cannot set its own status, so it would answer every
+    // unresolved path with a 200.
+    let err = red_crescent::resolve_fallback(Some("assets/style.css"), &serve_dir).unwrap_err();
+    assert!(err.contains("must be a .lhtml file"), "error: {err}");
+
+    let err = red_crescent::resolve_fallback(Some("../../Cargo.toml"), &serve_dir).unwrap_err();
+    assert!(
+        err.contains("escapes the serve directory") || err.contains("must be a .lhtml file"),
+        "error: {err}"
+    );
+
+    assert!(
+        red_crescent::resolve_fallback(None, &serve_dir)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        red_crescent::resolve_fallback(Some("/front.lhtml"), &serve_dir)
+            .unwrap()
+            .is_some(),
+        "a leading slash reads as serve-dir-relative"
+    );
+}
+
+#[actix_web::test]
 async fn c_module_dir_inside_serve_dir_is_refused() {
     let serve_dir = std::path::PathBuf::from("tests/fixtures")
         .canonicalize()

@@ -33,6 +33,9 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// `<data-dir>/.spool` — where multipart file parts land first.
     pub spool_dir: PathBuf,
+    /// Template rendered when a path resolves to nothing, canonicalized at
+    /// startup. `None` — the default — makes an unresolved path a 404.
+    pub fallback: Option<PathBuf>,
     pub render_cfg: Arc<RenderConfig>,
 }
 
@@ -59,17 +62,23 @@ pub async fn handler(
         target.push(&data.config.index);
     }
 
-    let Ok(abs) = target.canonicalize() else {
-        return not_found();
+    let abs = match target.canonicalize() {
+        Ok(abs) if abs.starts_with(&data.serve_dir) => abs,
+        Ok(abs) => {
+            log::warn!(
+                "prevented path escape: {} -> {}",
+                decoded_path,
+                abs.display()
+            );
+            return forbidden();
+        }
+        // Nothing on disk. A configured front controller gets the request
+        // instead of a 404, with the original path still in `request.path`.
+        Err(_) => match &data.fallback {
+            Some(path) => path.clone(),
+            None => return not_found(),
+        },
     };
-    if !abs.starts_with(&data.serve_dir) {
-        log::warn!(
-            "prevented path escape: {} -> {}",
-            decoded_path,
-            abs.display()
-        );
-        return forbidden();
-    }
 
     let is_lhtml = abs
         .extension()

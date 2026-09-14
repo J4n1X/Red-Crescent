@@ -375,6 +375,83 @@ async fn missing_files_return_404() {
 }
 
 #[actix_web::test]
+async fn a_fallback_template_catches_unresolved_paths() {
+    let (app, _) = app_with(Config {
+        fallback: Some("front.lhtml".to_string()),
+        ..test_config()
+    })
+    .await;
+
+    let resp =
+        test::call_service(&app, test::TestRequest::get().uri("/api/ping").to_request()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
+    assert_eq!(
+        body_string(resp).await.trim(),
+        r#"{"method":"GET","ok":true}"#
+    );
+
+    // The front controller owns the status too, so it can still answer 404.
+    let resp =
+        test::call_service(&app, test::TestRequest::get().uri("/api/nope").to_request()).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(body_string(resp).await.contains("no route for /api/nope"));
+}
+
+#[actix_web::test]
+async fn a_fallback_does_not_shadow_real_files_or_escapes() {
+    let (app, _) = app_with(Config {
+        fallback: Some("front.lhtml".to_string()),
+        ..test_config()
+    })
+    .await;
+
+    // A real template still wins.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get().uri("/hello.lhtml").to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_string(resp).await.contains("Hello"));
+
+    // A real static file still wins.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/assets/style.css")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Traversal is refused before the fallback is considered.
+    for uri in ["/../Cargo.toml", "/partials/%2e%2e/%2e%2e/Cargo.toml"] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "uri: {uri}");
+    }
+}
+
+#[actix_web::test]
+async fn a_fallback_receives_post_bodies() {
+    let (app, _) = app_with(Config {
+        fallback: Some("front.lhtml".to_string()),
+        ..test_config()
+    })
+    .await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post().uri("/api/ping").to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_string(resp).await.contains(r#""method":"POST""#));
+}
+
+#[actix_web::test]
 async fn oversized_bodies_are_rejected() {
     let app = default_app().await;
     let resp = test::call_service(

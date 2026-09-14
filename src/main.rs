@@ -9,7 +9,7 @@ use red_crescent::runtime::{Limits, RenderConfig, ThreadLimits};
 use red_crescent::template::TemplateCache;
 use red_crescent::threads::{self, ThreadRegistry};
 use red_crescent::web::{AppState, handler};
-use red_crescent::{resolve_c_module_dirs, setup_data_dir};
+use red_crescent::{resolve_c_module_dirs, resolve_fallback, setup_data_dir};
 
 /// Startup problems are the operator's to fix, so they get a plain message
 /// rather than a debug-formatted error struct.
@@ -49,6 +49,9 @@ async fn main() -> std::io::Result<()> {
 
     let (data_dir, spool_dir) =
         setup_data_dir(&config.data_dir, &serve_dir).unwrap_or_else(|e| fatal(e));
+
+    let fallback =
+        resolve_fallback(config.fallback.as_deref(), &serve_dir).unwrap_or_else(|e| fatal(e));
 
     // Enabling native modules takes every Lua state out of safe mode, so it is
     // announced rather than left to the config file.
@@ -119,10 +122,18 @@ async fn main() -> std::io::Result<()> {
         if config.dev { " (dev mode)" } else { "" }
     );
 
+    if let Some(path) = &fallback {
+        log::info!(
+            "paths that resolve to no file fall back to {}",
+            path.display()
+        );
+    }
+
     let state = web::Data::new(AppState {
         serve_dir,
         data_dir,
         spool_dir,
+        fallback,
         render_cfg,
         config: config.clone(),
     });

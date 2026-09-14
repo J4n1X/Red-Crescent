@@ -45,6 +45,37 @@ pub fn resolve_c_module_dirs(dirs: &[PathBuf], serve_dir: &Path) -> Result<Optio
     Ok(Some(parts.join(";")))
 }
 
+/// Resolve the front-controller template, if one is configured.
+///
+/// Checked at boot rather than per request, so a typo is a startup error
+/// instead of a 404 page that only misbehaves once someone hits a bad path.
+/// `.lhtml` is required: a static file cannot set its own status, so it would
+/// answer every unresolved path with a 200.
+pub fn resolve_fallback(
+    fallback: Option<&str>,
+    serve_dir: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let Some(rel) = fallback else {
+        return Ok(None);
+    };
+    let path = serve_dir
+        .join(rel.trim_start_matches('/'))
+        .canonicalize()
+        .map_err(|e| format!("fallback template '{rel}': not found: {e}"))?;
+    if !path.starts_with(serve_dir) {
+        return Err(format!(
+            "fallback template '{rel}': escapes the serve directory"
+        ));
+    }
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("lhtml"))
+    {
+        return Err(format!("fallback template '{rel}': must be a .lhtml file"));
+    }
+    Ok(Some(path))
+}
+
 /// Create and canonicalize the data directory and its upload spool.
 ///
 /// Refuses a data directory inside the serve directory — databases and

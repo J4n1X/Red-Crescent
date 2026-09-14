@@ -1,17 +1,19 @@
 <?lua
     -- Public share page — no login. Serves a single shared file, or lets
     -- anyone browse and download inside a shared folder.
-    --   ?t=<token>            the share
-    --   &f=<folder_id>        a subfolder (must live inside the shared tree)
-    --   &dl=<file_id>         download one file (must live inside the tree)
-    --   &zip=1                download the folder (or subfolder) as an archive
+    --
+    -- Reached as /s/<token>, which app.lhtml routes here with the token in
+    -- the `share_token` global; the rest stays in the query string.
+    --   ?f=<folder_id>        a subfolder (must live inside the shared tree)
+    --   ?dl=<file_id>         download one file (must live inside the tree)
+    --   ?zip=1                download the folder (or subfolder) as an archive
     local dbm = require("lib.db")
     local filesm = require("lib.files")
     local sharesm = require("lib.shares")
     local util = require("lib.util")
 
     local db = dbm.open()
-    local share = sharesm.lookup(db, request.query.t)
+    local share = sharesm.lookup(db, share_token)
 
     local function gone(message)
         response.status = 404
@@ -31,7 +33,7 @@
 
     -- Everything inside a share is read through its creator's ownership.
     local owner = { id = share.owner_id }
-    local token_param = util.urlencode(share.token)
+    local share_url = "/s/" .. util.urlencode(share.token)
 
     -- --- single-file share -------------------------------------------------
 
@@ -56,7 +58,7 @@
         · <?lua= share.downloads ?> download<?lua= share.downloads == 1 and "" or "s" ?>
         <?lua if share.expires_at then ?>· link expires <?lua= util.format_time(share.expires_at) ?><?lua end ?>
     </p>
-    <a class="bigdl" href="/s.lhtml?t=<?lua= token_param ?>&amp;dl=1">⬇ Download</a>
+    <a class="bigdl" href="<?lua= share_url ?>?dl=1">⬇ Download</a>
 </div>
 <?lua include("partials/footer.lhtml") ?>
 <?lua
@@ -99,9 +101,9 @@
         local archive = require("lib.archive")
         local built, err = archive.build(db, owner, folder)
         if not built then
-            redirect("/s.lhtml?t=" .. token_param
-                .. (folder.id ~= root.id and ("&f=" .. folder.id) or "")
-                .. "&err=" .. util.urlencode("Could not build the archive: " .. tostring(err)))
+            redirect(share_url
+                .. (folder.id ~= root.id and ("?f=" .. folder.id .. "&") or "?")
+                .. "err=" .. util.urlencode("Could not build the archive: " .. tostring(err)))
         end
         sharesm.count_download(db, share.token)
         response.send_file(built.path, {
@@ -141,11 +143,11 @@
 <div class="crumbs">
     <?lua for i, crumb in ipairs(crumbs) do ?>
         <?lua if i > 1 then ?><span class="sep">/</span><?lua end ?>
-        <a href="/s.lhtml?t=<?lua= token_param ?>&amp;f=<?lua= crumb.id ?>"><?lua= html_escape(crumb.name) ?></a>
+        <a href="<?lua= share_url ?>?f=<?lua= crumb.id ?>"><?lua= html_escape(crumb.name) ?></a>
     <?lua end ?>
     <?lua if archiver then ?>
         <span class="sep">·</span>
-        <a href="/s.lhtml?t=<?lua= token_param ?>&amp;f=<?lua= folder.id ?>&amp;zip=1">⬇ Download this folder as <?lua= archiver.ext:upper() ?></a>
+        <a href="<?lua= share_url ?>?f=<?lua= folder.id ?>&amp;zip=1">⬇ Download this folder as <?lua= archiver.ext:upper() ?></a>
     <?lua end ?>
 </div>
 
@@ -153,14 +155,14 @@
     <tr><th>Name</th><th>Size</th><th>Added</th></tr>
     <?lua for _, sub in ipairs(subfolders) do ?>
         <tr>
-            <td>📁 <a href="/s.lhtml?t=<?lua= token_param ?>&amp;f=<?lua= sub.id ?>"><?lua= html_escape(sub.name) ?></a></td>
+            <td>📁 <a href="<?lua= share_url ?>?f=<?lua= sub.id ?>"><?lua= html_escape(sub.name) ?></a></td>
             <td class="meta">—</td>
             <td class="meta"><?lua= util.format_time(sub.created_at) ?></td>
         </tr>
     <?lua end ?>
     <?lua for _, file in ipairs(files) do ?>
         <tr>
-            <td>📄 <a href="/s.lhtml?t=<?lua= token_param ?>&amp;dl=<?lua= file.id ?>"><?lua= html_escape(file.name) ?></a></td>
+            <td>📄 <a href="<?lua= share_url ?>?dl=<?lua= file.id ?>"><?lua= html_escape(file.name) ?></a></td>
             <td class="meta"><?lua= util.human_size(file.size) ?></td>
             <td class="meta"><?lua= util.format_time(file.created_at) ?></td>
         </tr>

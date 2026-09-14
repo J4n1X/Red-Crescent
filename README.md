@@ -96,9 +96,51 @@ All options as flags and environment variables (`--help` for the full list):
 | `--c-module-dir` | `RC_C_MODULE_DIRS` | — | Directory of native `.so` Lua modules `require` may load, repeatable (off by default; needs a `--features c-modules` build) |
 | `--static-files` | `RC_STATIC_FILES` | `true` | Serve non-`.lhtml` files |
 | `--index` | `RC_INDEX` | `index.lhtml` | File served for `/` and directories |
+| `--fallback` | `RC_FALLBACK` | — | Template rendered when a path resolves to no file (front controller) |
 | `--dev` | `RC_DEV` | `false` | Detailed error pages, no template cache |
 
 Log verbosity is controlled with `RUST_LOG` (default `info`), e.g. `RUST_LOG=debug cargo run`.
+
+### Routing
+
+A request path is resolved against the filesystem: the URL path is joined to the serve
+directory, a directory gets `--index` appended, and anything that does not land on a real file
+is a 404. `/about.lhtml` is a file called `about.lhtml`, and that is the whole rule.
+
+`fallback` adds one escape hatch — a **front controller**. Set it to a template and every path
+that resolves to no file renders that template instead of returning 404, with the original path
+in `request.path`:
+
+```lua
+-- rc_config.lua
+return { fallback = "app.lhtml" }
+```
+
+```html
+<?lua
+local token = request.path:match("^/s/(%w+)$")
+if token then
+    -- serve the share page
+    return
+end
+response.status = 404
+?>
+Not found.
+```
+
+Real files always win — the fallback only sees paths that resolve to nothing, so static assets
+and ordinary templates keep working untouched. Path traversal is still refused with a 403
+before the fallback is considered. The template must be `.lhtml` and inside the serve
+directory, and it is checked at startup, so a typo stops the server instead of breaking 404s
+later.
+
+Two things to know before turning it on. The response is a **200 unless the template says
+otherwise** — a front controller owns its own statuses, including the 404 above. And the
+fallback catches *everything* unresolved, `/favicon.ico` and stray crawler paths included, so
+each of those now costs a Lua render rather than a cheap 404.
+
+Route *matching* is deliberately the application's job: the platform provides the entry point,
+and a Lua table of patterns is a better router than anything a config file could express.
 
 ## Template Syntax
 

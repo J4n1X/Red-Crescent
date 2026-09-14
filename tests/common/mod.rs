@@ -42,6 +42,7 @@ pub fn test_config(serve_dir: &str) -> Config {
         sqlite_idle_connections: 2,
         static_files: true,
         index: "index.lhtml".to_string(),
+        fallback: None,
         dev: false,
         c_module_dirs: Vec::new(),
     }
@@ -85,10 +86,14 @@ pub async fn app_with(
             .map(Arc::from),
     });
 
+    let fallback = red_crescent::resolve_fallback(config.fallback.as_deref(), &serve_dir)
+        .expect("fallback template");
+
     let state = web::Data::new(AppState {
         serve_dir,
         data_dir: data_dir.clone(),
         spool_dir,
+        fallback,
         render_cfg,
         config,
     });
