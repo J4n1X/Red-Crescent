@@ -4,7 +4,7 @@ use std::time::Duration;
 use actix_web::{App, HttpServer, middleware, web};
 use clap::Parser;
 
-use red_crescent::config::{CliArgs, Config, load_file_config};
+use red_crescent::config::{Config, Settings, load_file_config};
 use red_crescent::runtime::{Limits, RenderConfig, ThreadLimits};
 use red_crescent::template::TemplateCache;
 use red_crescent::threads::{self, ThreadRegistry};
@@ -20,7 +20,7 @@ fn fatal(message: impl std::fmt::Display) -> ! {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let cli = CliArgs::parse();
+    let cli = Settings::parse();
 
     pretty_env_logger::formatted_builder()
         .parse_filters(&std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
@@ -91,6 +91,7 @@ async fn main() -> std::io::Result<()> {
         max_upload_files: config.max_upload_files,
         threads: Arc::new(ThreadRegistry::new()),
         // 0 reads as "no deadline", same as leaving it unset.
+        sqlite_idle_connections: config.sqlite_idle_connections,
         thread_limits: ThreadLimits {
             timeout: config
                 .thread_timeout_ms

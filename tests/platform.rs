@@ -800,3 +800,38 @@ async fn the_thread_cap_counts_only_live_runs() {
         );
     }
 }
+
+// --- sqlite connection reuse -------------------------------------------
+
+#[actix_web::test]
+async fn an_aborted_transaction_does_not_poison_a_reused_connection() {
+    // Connections are parked for the next request, so one that ended inside a
+    // transaction would otherwise hand over its uncommitted writes and an open
+    // write lock. Repeated because which pool thread serves a request -- and
+    // therefore which parked connection is reused -- is not deterministic.
+    let (app, _) = app_with(test_config("tests/fixtures")).await;
+    for _ in 0..15 {
+        let body = thread_body(&app, "/txn_leak.lhtml?mode=leak").await;
+        assert!(body.contains("left-open"), "body: {body}");
+    }
+    for _ in 0..15 {
+        let body = thread_body(&app, "/txn_leak.lhtml?mode=read").await;
+        assert!(
+            body.contains("count=0"),
+            "uncommitted row survived into a later request: {body}"
+        );
+    }
+}
+
+#[actix_web::test]
+async fn sqlite_reuse_can_be_turned_off() {
+    let mut config = test_config("tests/fixtures");
+    config.sqlite_idle_connections = 0;
+    let (app, _) = app_with(config).await;
+    for _ in 0..5 {
+        let body = thread_body(&app, "/txn_leak.lhtml?mode=leak").await;
+        assert!(body.contains("left-open"), "body: {body}");
+    }
+    let body = thread_body(&app, "/txn_leak.lhtml?mode=read").await;
+    assert!(body.contains("count=0"), "body: {body}");
+}

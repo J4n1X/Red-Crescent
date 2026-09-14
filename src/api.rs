@@ -103,7 +103,7 @@ pub(crate) fn install_core(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
 
     // --- sqlite + crypto -------------------------------------------------
 
-    sqlite_api::register(lua, &cfg.data_dir)?;
+    sqlite_api::register(lua, &cfg.data_dir, cfg.sqlite_idle_connections)?;
     crypto_api::register(lua)?;
 
     // --- background threads ----------------------------------------------

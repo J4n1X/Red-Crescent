@@ -60,6 +60,9 @@ pub struct RenderConfig {
     pub max_upload_files: usize,
     /// Which named background threads are alive, process-wide.
     pub threads: Arc<ThreadRegistry>,
+    /// Warm SQLite connections parked per database, per thread. 0 disables
+    /// reuse, so every `sqlite.open` pays the full first-statement cost.
+    pub sqlite_idle_connections: usize,
     /// Thread limits; `limits` above is the per-request budget.
     pub thread_limits: ThreadLimits,
     /// `package.cpath` for native modules, `None` when disabled (the default).
