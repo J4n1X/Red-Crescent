@@ -119,10 +119,6 @@ local MIGRATIONS = {
     },
 }
 
-local function shell_quote(path)
-    return "'" .. path:gsub("'", "'\\''") .. "'"
-end
-
 function M.open()
     local db = sqlite.open("drive/drive.db")
     db:execute("PRAGMA foreign_keys = ON")
@@ -139,7 +135,7 @@ function M.open()
         log.info("drive: applied schema migration " .. v)
     end
 
-    os.execute("mkdir -p " .. shell_quote(M.FILES_DIR))
+    process.run{"mkdir", "-p", "--", M.FILES_DIR, capture = false}
 
     -- Make sure the housekeeping thread is alive. Idempotent by name, and it
     -- resurrects the thread if it ever died — no --thread flag required.

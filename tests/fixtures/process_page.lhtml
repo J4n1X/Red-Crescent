@@ -1,0 +1,17 @@
+<?lua
+local hostile = [[a; rm -rf /tmp/x; $(whoami) `id` 'q' "w" | tee]]
+local echoed = process.run{"echo", hostile}
+print("verbatim=" .. tostring(echoed.stdout:gsub("\n", "") == hostile) .. ";")
+
+local missing = process.run{"rc-definitely-no-such-binary"}
+print("started=" .. tostring(missing.started) .. ";")
+
+local slow = process.run{"sleep", "5", timeout = 0.3}
+print("timedout=" .. tostring(slow.timed_out) .. ";ok=" .. tostring(slow.ok) .. ";")
+
+local failed = process.run{"false"}
+print("code=" .. tostring(failed.code) .. ";")
+
+local where = process.run{"pwd", cwd = server.data_dir}
+print("cwd=" .. tostring(where.stdout:gsub("\n", "") == server.data_dir) .. ";")
+?>

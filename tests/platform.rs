@@ -835,3 +835,36 @@ async fn sqlite_reuse_can_be_turned_off() {
     let body = thread_body(&app, "/txn_leak.lhtml?mode=read").await;
     assert!(body.contains("count=0"), "body: {body}");
 }
+
+// --- process.run and fs -------------------------------------------------
+
+#[actix_web::test]
+async fn process_run_passes_arguments_without_a_shell() {
+    let (app, _) = app_with(test_config("tests/fixtures")).await;
+    let body = thread_body(&app, "/process_page.lhtml").await;
+    // The whole point: shell syntax in an argument is data, never syntax.
+    assert!(body.contains("verbatim=true"), "body: {body}");
+    // A program that cannot start is a different answer from one that failed.
+    assert!(body.contains("started=false"), "body: {body}");
+    // The execution hook cannot fire while Lua waits on a child, so this
+    // timeout is the only thing that can end a hung one.
+    assert!(body.contains("timedout=true;ok=false"), "body: {body}");
+    assert!(body.contains("code=1"), "body: {body}");
+    assert!(body.contains("cwd=true"), "body: {body}");
+}
+
+#[actix_web::test]
+async fn fs_links_and_stays_inside_the_data_directory() {
+    let (app, _) = app_with(test_config("tests/fixtures")).await;
+    let body = thread_body(&app, "/fs_page.lhtml").await;
+    assert!(body.contains("linked=true"), "body: {body}");
+    assert!(body.contains("same=true"), "body: {body}");
+    assert!(
+        body.contains("escape=false"),
+        "traversal was allowed: {body}"
+    );
+    assert!(
+        body.contains("absolute=false"),
+        "absolute path allowed: {body}"
+    );
+}
