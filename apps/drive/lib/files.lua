@@ -70,6 +70,36 @@ function M.all_folders(db, user)
     return db:query("SELECT * FROM folders WHERE owner_id = ? ORDER BY name", { user.id })
 end
 
+-- Every folder with its full path, parents before children. A flat list sorted
+-- by name cannot tell two folders called "photos" apart, nor say where either
+-- one lives. Paths are unique, since a parent cannot hold two folders of the
+-- same name, which is what lets the browser match a subtree by prefix.
+function M.folder_paths(db, user)
+    local rows = db:query(
+        "SELECT id, parent_id, name FROM folders WHERE owner_id = ? ORDER BY name", { user.id })
+
+    local children = {}
+    for _, row in ipairs(rows) do
+        local key = row.parent_id or 0
+        children[key] = children[key] or {}
+        table.insert(children[key], row)
+    end
+
+    local out = {}
+    local function walk(parent_key, prefix, depth)
+        -- Depth-capped like is_within: corrupt data must not spin forever.
+        if depth > 64 then return end
+        for _, row in ipairs(children[parent_key] or {}) do
+            row.path = prefix .. "/" .. row.name
+            row.depth = depth
+            table.insert(out, row)
+            walk(row.id, row.path, depth + 1)
+        end
+    end
+    walk(0, "", 0)
+    return out
+end
+
 -- Bytes currently stored by a user.
 function M.usage(db, user)
     return db:query("SELECT COALESCE(SUM(size), 0) AS n FROM files WHERE owner_id = ?",
@@ -246,6 +276,35 @@ function M.create_folder(db, user, parent, name)
         return nil, "A folder with that name already exists here."
     end
     return result.last_insert_rowid
+end
+
+-- Returns true, or nil + error message.
+function M.rename_folder(db, user, folder, new_name)
+    if not valid_name(new_name) then return nil, "Invalid folder name." end
+    if not try_unique(function()
+        db:execute("UPDATE folders SET name = ? WHERE id = ? AND owner_id = ?",
+            { new_name, folder.id, user.id })
+    end) then
+        return nil, "A folder with that name already exists here."
+    end
+    return true
+end
+
+-- dest may be nil (root). Returns true, or nil + error message.
+function M.move_folder(db, user, folder, dest)
+    -- Into itself or its own subtree would cut the whole branch loose in a
+    -- cycle that no listing can reach and no breadcrumb can escape.
+    if dest and (dest.id == folder.id or M.is_within(db, user.id, dest.id, folder.id)) then
+        return nil, "A folder cannot be moved into itself."
+    end
+    local dest_id = dest and dest.id or sqlite.NULL
+    if not try_unique(function()
+        db:execute("UPDATE folders SET parent_id = ? WHERE id = ? AND owner_id = ?",
+            { dest_id, folder.id, user.id })
+    end) then
+        return nil, "A folder with that name already exists in the target folder."
+    end
+    return true
 end
 
 -- Recursively deletes a folder: all contained files (rows + disk) and

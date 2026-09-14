@@ -188,6 +188,69 @@
         xhr.send(new FormData(form));
     });
 
+    // --- manage dialog ----------------------------------------------------
+    //
+    // Listing rows carry only a link: the forms live in one dialog per page, so
+    // the folder <select> is emitted once rather than once per row. Without
+    // script the link goes to manage.lhtml, which has the same forms.
+
+    var manageDialog = document.getElementById("manage");
+
+    document.addEventListener("click", function (event) {
+        if (!manageDialog) { return; }
+
+        if (event.target.classList && event.target.classList.contains("manage-close")) {
+            manageDialog.close();
+            return;
+        }
+
+        var link = event.target.closest ? event.target.closest("a[data-manage]") : null;
+        if (!link || !manageDialog.showModal) { return; }
+        if (event.button !== 0 || event.ctrlKey || event.metaKey ||
+            event.shiftKey || event.altKey) { return; }
+        event.preventDefault();
+
+        // One dialog serves files and folders; the action names differ only by
+        // suffix, so each form declares its operation and the kind completes it.
+        var kind = link.getAttribute("data-kind") === "folder" ? "folder" : "file";
+        var id = (link.href.match(/[?&](?:file|folder)=(\d+)/) || [])[1] || "";
+        var forms = manageDialog.querySelectorAll("form[data-op]");
+        for (var i = 0; i < forms.length; i++) {
+            var op = forms[i].getAttribute("data-op");
+            forms[i].querySelector('input[name="action"]').value = op + "_" + kind;
+            forms[i].querySelector('input[name="id"]').value = id;
+            if (op === "delete") {
+                forms[i].setAttribute("data-confirm", kind === "folder"
+                    ? "Delete this folder and everything inside it?"
+                    : "Delete this file?");
+            }
+        }
+        // Moving a folder into itself or its own subtree is refused by the
+        // server; offering those options at all is just a trap. Paths are
+        // unique, so a subtree is exactly the prefix match.
+        var own = kind === "folder" ? (link.getAttribute("data-path") || "") : "";
+        var select = manageDialog.querySelector('select[name="dest"]');
+        if (select) {
+            var options = select.options;
+            for (var j = 0; j < options.length; j++) {
+                var path = options[j].getAttribute("data-path") || "";
+                var blocked = own !== "" &&
+                    (path === own || path.indexOf(own + "/") === 0);
+                options[j].hidden = blocked;
+                options[j].disabled = blocked;
+            }
+            // The previous row's choice may now be hidden.
+            select.value = "";
+        }
+
+        var name = link.getAttribute("data-name") || "";
+        var field = manageDialog.querySelector('input[name="name"]');
+        if (field) { field.value = name; }
+        var title = manageDialog.querySelector(".manage-title");
+        if (title) { title.textContent = name; }
+        manageDialog.showModal();
+    });
+
     // --- folder archives --------------------------------------------------
     //
     // The link means "enqueue a job". Without script it leads to a page that

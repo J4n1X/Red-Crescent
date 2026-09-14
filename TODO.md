@@ -129,16 +129,6 @@ checking they don't work against each other.
 
 ## Drive
 
-### The file listing is 2.2 KB of HTML per row
-A 1000-file listing renders 2.2 MB and takes 24ms; 5000 files is 11 MB and 65ms. Each row carries
-a `<details>` block containing rename and move forms, and the move form has a `<select>` listing
-*every* folder the user owns -- so the markup is roughly quadratic in folders and linear in files
-on top of that.
-
-Worth more than every runtime optimisation on this list combined. The fix is to stop emitting
-per-row forms: one shared dialog populated on demand, or a row action that navigates rather than
-inlining the whole form. Neither needs platform work.
-
 ### No POSIX metadata is preserved
 Uploads come back with the upload time and default permissions — Drive stores bytes only.
 Harmless for documents, wrong for anything executable. Decide whether `files` should carry
@@ -181,3 +171,13 @@ same worker thread took a 50-file Drive listing from a 5.413ms median to 4.425ms
 3.581 on a second alternating run, with a tighter p75 both times. A connection is parked only if
 it can be handed on cleanly -- open transaction rolled back, `foreign_keys` reset, temp tables
 mean discard. The rollback is covered by a test that was checked to fail without it.
+
+**Drive's listing markup: done, measured.** Rows carried a `<details>` block with rename and move
+forms, and the move form repeated a `<select>` of every folder the user owns -- quadratic in
+folders. The forms now live in one dialog per page, rows carry a `Manage` link, and
+`manage.lhtml` is the no-JavaScript path. Page bytes: 10 files 25,079 -> 9,114; 100 files
+223,267 -> 49,261; 1000 files 2,211,372 -> 456,065; 5000 files 11,075,373 -> 2,288,066. Adding 20
+folders to a 5000-file listing now costs 20 KB rather than megabytes. Row actions then became
+icons, which costs about 11% back (the `title` + `aria-label` pair), leaving 1000 files at
+506,221 bytes. Folders gained rename and move at the same time -- they previously had neither --
+with `is_within` guarding against a move into a folder's own subtree.

@@ -124,6 +124,25 @@
         filesm.delete_file(db, user, file)
         back("/", "File deleted.")
 
+    elseif action == "rename_folder" then
+        local folder = filesm.get_folder(db, user, request.body.id)
+        if not folder then back("/", nil, "Folder not found.") end
+        local _, err = filesm.rename_folder(db, user, folder, request.body.name)
+        if err then back("/", nil, err) end
+        back("/", "Renamed.")
+
+    elseif action == "move_folder" then
+        local folder = filesm.get_folder(db, user, request.body.id)
+        if not folder then back("/", nil, "Folder not found.") end
+        local dest = nil
+        if request.body.dest and request.body.dest ~= "" then
+            dest = filesm.get_folder(db, user, request.body.dest)
+            if not dest then back("/", nil, "Target folder not found.") end
+        end
+        local _, err = filesm.move_folder(db, user, folder, dest)
+        if err then back("/", nil, err) end
+        back("/", "Moved.")
+
     elseif action == "delete_folder" then
         local folder = filesm.get_folder(db, user, request.body.id)
         if not folder then back("/", nil, "Folder not found.") end
