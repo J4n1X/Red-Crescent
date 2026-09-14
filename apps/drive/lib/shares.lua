@@ -28,6 +28,23 @@ function M.for_target(db, user, kind, target)
         { target.id, user.id })
 end
 
+-- Every link this user has handed out, newest first, with the name of what it
+-- points at. Expired rows are included so they can be cleaned up by hand;
+-- they already fail at access time.
+function M.all_for_user(db, user)
+    return db:query([[
+        SELECT s.token, s.expires_at, s.downloads, s.created_at,
+               s.file_id, s.folder_id,
+               COALESCE(f.name, d.name) AS target_name,
+               f.size AS file_size
+          FROM shares s
+          LEFT JOIN files   f ON f.id = s.file_id
+          LEFT JOIN folders d ON d.id = s.folder_id
+         WHERE s.created_by = ?
+         ORDER BY s.created_at DESC
+    ]], { user.id })
+end
+
 -- Resolves a token, enforcing expiry at access time. Returns a table with
 -- `kind`, `owner_id`, the share metadata, and either `file` or `folder`.
 function M.lookup(db, token)

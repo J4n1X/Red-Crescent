@@ -133,6 +133,14 @@
     elseif action == "share_create" or action == "share_revoke" then
         -- Shares target either a file or a whole folder.
         local kind = request.body.kind == "folder" and "folder" or "file"
+
+        -- The overview lists links whose target may be anything, so it revokes
+        -- by token alone and comes back to itself.
+        if action == "share_revoke" and request.body.from == "all" then
+            sharesm.revoke(db, user, request.body.token or "")
+            redirect("/shares.lhtml?msg=" .. util.urlencode("Share link revoked."))
+        end
+
         local target = kind == "folder"
             and filesm.get_folder(db, user, request.body.id)
             or filesm.get_file(db, user, request.body.id)

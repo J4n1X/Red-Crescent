@@ -15,6 +15,7 @@
     <a class="brand" href="/">🌙 Drive</a>
     <nav>
         <?lua if current_user then ?>
+            <a href="/shares.lhtml">Shares</a>
             <?lua if current_user.is_admin == 1 then ?><a href="/admin.lhtml">Admin</a><?lua end ?>
             <span class="who"><?lua= html_escape(current_user.username) ?></span>
             <form method="post" action="/logout.lhtml" class="inline">
