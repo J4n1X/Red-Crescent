@@ -1,0 +1,27 @@
+<?lua
+    -- Front controller. Red Crescent hands this every path that resolves to
+    -- no file (`fallback` in rc_config.lua), so it routes what Drive owns by
+    -- URL shape and answers everything else with a 404 in Drive's own chrome.
+    --   /s/<token>            public share link
+    share_token = request.path:match("^/s/(%w+)/?$")
+    if share_token then
+        include("s.lhtml")
+        exit()
+    end
+
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+
+    local db = dbm.open()
+    current_user = auth.current_user(db)
+    csrf_html = current_user and auth.csrf_field(current_user) or ""
+    page_title = "Not found"
+    response.status = 404
+?>
+<?lua include("partials/header.lhtml") ?>
+<div class="authbox">
+    <h1>Not found</h1>
+    <p>There is nothing at <code><?lua= html_escape(request.path) ?></code>.</p>
+    <p><a href="/">Back to your files</a></p>
+</div>
+<?lua include("partials/footer.lhtml") ?>

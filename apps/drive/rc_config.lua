@@ -26,6 +26,10 @@ return {
     -- That removes some overhead from opening connections.
     sqlite_idle_connections = 8,
 
+    -- Front controller for paths that are not files: share links are
+    -- /s/<token>, and anything else unresolved gets Drive's own 404.
+    fallback = "app.lhtml",
+
     -- Housekeeping runs from boot rather than waiting for the first request.
     threads = { "jobs/cleanup.lua" },
 }

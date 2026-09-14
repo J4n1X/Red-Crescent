@@ -57,7 +57,7 @@
             local target_url = is_folder
                 and ("/?folder=" .. share.folder_id)
                 or ("/download.lhtml?id=" .. share.file_id)
-            local link = base .. "/s.lhtml?t=" .. util.urlencode(share.token)
+            local link = base .. "/s/" .. util.urlencode(share.token)
         ?>
         <tr>
             <td><?lua= is_folder and "📁" or "📄" ?>
@@ -125,7 +125,7 @@
 <?lua else ?>
     <?lua for _, share in ipairs(shares) do ?>
         <div class="panel">
-            <span class="sharelink"><?lua= base ?>/s.lhtml?t=<?lua= util.urlencode(share.token) ?></span>
+            <span class="sharelink"><?lua= base ?>/s/<?lua= util.urlencode(share.token) ?></span>
             <p class="meta">
                 created <?lua= util.format_time(share.created_at) ?>
                 · <?lua= share.downloads ?> download<?lua= share.downloads == 1 and "" or "s" ?>

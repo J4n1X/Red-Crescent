@@ -108,6 +108,11 @@ pub struct Settings {
     #[arg(long, env = "RC_INDEX")]
     pub index: Option<String>,
 
+    /// Template rendered when a path resolves to no file, relative to the
+    /// serve directory — a front controller. Unset means 404 [default: none]
+    #[arg(long, env = "RC_FALLBACK")]
+    pub fallback: Option<String>,
+
     /// Dev mode: detailed error pages and no template caching
     #[arg(long, env = "RC_DEV", num_args = 0..=1, default_missing_value = "true")]
     pub dev: Option<bool>,
@@ -175,6 +180,9 @@ pub struct Config {
     pub max_upload_files: usize,
     pub static_files: bool,
     pub index: String,
+    /// Template for paths that resolve to nothing, relative to the serve
+    /// directory. `None` — the default — makes those a 404.
+    pub fallback: Option<String>,
     pub dev: bool,
     pub threads: Vec<String>,
     /// Deadline for one awake stretch of a background thread. `None` — the
@@ -237,6 +245,7 @@ impl Config {
             ),
             static_files: pick(cli.static_files, file.static_files, true),
             index: pick(cli.index.clone(), file.index, DEFAULT_INDEX.to_string()),
+            fallback: cli.fallback.clone().or(file.fallback),
             dev: pick(cli.dev, file.dev, false),
             threads: pick_list(&cli.threads, file.threads),
             thread_timeout_ms: cli.thread_timeout_ms.or(file.thread_timeout_ms),
@@ -411,6 +420,14 @@ mod tests {
     fn c_module_dirs_must_be_an_array() {
         assert!(file_config_from(r#"return { c_module_dirs = "/usr/lib" }"#).is_err());
         assert!(file_config_from(r#"return { c_module_dirs = true }"#).is_err());
+    }
+
+    #[test]
+    fn fallback_is_unset_by_default_and_readable_from_the_file() {
+        assert!(Config::default().fallback.is_none());
+        let config = file_config_from(r#"return { fallback = "app.lhtml" }"#).unwrap();
+        assert_eq!(config.fallback.as_deref(), Some("app.lhtml"));
+        assert!(file_config_from("return { fallback = true }").is_err());
     }
 
     #[test]

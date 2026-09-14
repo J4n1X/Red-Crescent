@@ -37,7 +37,8 @@ want it running from boot rather than from the first request.
 | `download.lhtml` | Authenticated download of a single file via `response.send_file` |
 | `archive.lhtml` | Folder downloads: queue a job, watch it, collect the finished archive |
 | `shares.lhtml` | All your share links, or create/revoke the ones for a single item (`?file=` / `?folder=`) |
-| `s.lhtml` | **Public** share page: a single file, or a browsable shared folder (`?t=<token>`) |
+| `app.lhtml` | Front controller for paths that are not files: routes `/s/<token>`, 404s the rest |
+| `s.lhtml` | **Public** share page: a single file, or a browsable shared folder, reached as `/s/<token>` |
 | `login/register/logout/admin.lhtml` | Auth flow and user management |
 | `config.lua` | App settings: share-link base URL, session lifetime, archive ceilings |
 | `rc_config.lua` | Server settings Red Crescent reads at startup |
@@ -98,7 +99,7 @@ archives land in `drive/tmp/` where the cleanup thread sweeps them — along wit
   used — reach the app over a LAN or Tailscale IP and the link will contain that IP, which
   the person you send it to cannot resolve. Set `share_base_url` in `config.lua` to pin a
   public address once the app has one; it then wins over anything in the request.
-- Share links are unguessable 128-bit tokens; expiry is checked at access time
+- Share links are `/s/<token>`, an unguessable 128-bit token; expiry is checked at access time
   (the cleanup job only garbage-collects). A **folder share** lets anyone with the link
   browse that folder, descend into it, download single files, and grab any subtree as an
   archive — but the share root is a hard boundary: every folder and file id is verified to

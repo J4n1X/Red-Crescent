@@ -39,19 +39,40 @@ Open design questions worth settling before writing code:
   be keyed by site.
 
 ### Streaming responses
-The rendered body is buffered whole and handed to actix in one piece (`builder.body(rendered.body)`
-in `src/web.rs`), so nothing a template produces reaches the client until it has finished. That
-rules out server-sent events, progress output during a long operation, and generating a large
-download without staging it on disk first — all of which PHP does with `flush()`. It is also why
-the Drive archive item below has to be solved with a worker and a polling page instead of simply
-streaming the archive out as it is built.
+The rendered body is buffered whole and handed to actix in one piece
+(`builder.body(rendered.body)` in `src/web.rs`), so nothing a template produces reaches the client
+until it has finished. No server-sent events, no progress during a long operation, no generating a
+large download without staging it to disk. `response.send_file` already streams, so the gap is only
+in *generated* output.
 
-Not a small change: Lua runs to completion inside a single `web::block` call, so streaming needs
-either a channel the render loop writes into while the async side forwards chunks, or a Lua
-coroutine that yields at flush points. Worth scoping properly before promising it. Note that
-`response.send_file` already streams (it hands off to `actix_files::NamedFile`), so the gap is
-only in *generated* output.
+**Design, decided:** a bounded channel, not a coroutine. The render closure gets a sender; the async
+side spawns it rather than awaiting, and decides the response shape from the first message -- a
+header commit means stream, no message before completion means build the response exactly as today.
 
+The coroutine alternative was rejected on a fact rather than taste: `Lua` is `!Send`, so a coroutine
+must be resumed on the thread that created it, and a blocking thread stays parked for the request
+either way. Streaming buys time-to-first-byte and bounded memory, **not** concurrency. A channel
+gets both without a resumption state machine or a third way to unwind alongside `exit()`/`redirect()`.
+
+**`flush()` is the opt-in.** A template that never calls it must stay byte-identical to today, which
+keeps every existing test and all of Drive on the current path. An auto-flush threshold was
+considered and rejected: it silently commits headers mid-render, and Drive's listing writes ~500 KB
+before it finishes, so that page's semantics would change under it. If a threshold is ever wanted,
+it belongs behind a config key that defaults to off.
+
+**First flush commits headers.** After it, `response.status`, header writes, `redirect()` and
+`send_file()` cannot work -- PHP's "headers already sent". Raise, do not silently no-op.
+
+Two properties to accept before starting, neither fixable:
+- **A streamed response is not atomic.** An error after the first flush has no error page to send:
+  the client already holds a 200 and a partial body. Log and truncate, so it looks incomplete rather
+  than plausibly complete. PHP has the same hole.
+- **A slow client parks a blocking thread.** Backpressure is correct and keeps memory flat, but the
+  execution-timeout hook cannot fire during a blocked send -- same class as `os.execute`. Tie the
+  send deadline to the request's remaining budget rather than adding a second knob.
+
+Touches the core request path: `web.rs` (spawn, select on first message), `runtime.rs` (sender and
+flush plumbing), `api.rs` (`flush()` and the post-commit guards), plus tests.
 ### Native TLS (rustls)
 So a standalone deployment needs no reverse proxy. Meets the "every web project needs it" bar;
 nginx currently supplies it, which is a perfectly good answer for now.
@@ -81,22 +102,9 @@ Lua is parked inside `os.execute`. PHP's `max_execution_time` has precisely the 
 Linux, so this is not a regression against PHP, but an app depending on it is depending on a gap
 rather than on a guarantee, and a future change that narrows the gap would break it.
 
-A `process.run` with a timeout of its own (previous item) covers the case that actually occurs.
+`process.run` now carries its own timeout, which covers the case that actually occurs in practice.
 The general problem — a hung C call inside any built-in, or inside a native module now that
 those can be enabled — is only solvable by running the Lua instance somewhere killable, which is a much larger change and probably not worth it.
-
-### No routing without a rewrite in front
-Path resolution is the filesystem and nothing else (`src/web.rs`): the decoded URL path is joined
-to the serve directory, a directory gets `--index` appended, and anything that does not resolve
-to a real file is a 404. There is no PATH_INFO, no rewrite, and no way to say "everything under
-`/api/` goes to one template". A front-controller app works only because nginx can rewrite in
-front of it — which is exactly PHP's position too, so this is a tie right up until the server is
-meant to run standalone. That is the same day `--bind 0.0.0.0` and native TLS start mattering,
-which is why these three belong together.
-
-Cheapest useful version: an optional `fallback = "app.lhtml"` in `rc_config.lua`, served whenever
-the path does not resolve to a file, with the original path already available as `request.path`.
-That is a front controller with no new concepts.
 
 ### Multipart reading dispatches per chunk
 `read_multipart` in `src/web.rs` calls `web::block` for every chunk actix hands it. Over a
@@ -166,6 +174,29 @@ folders to a 5000-file listing now costs 20 KB rather than megabytes. Row action
 icons, which costs about 11% back (the `title` + `aria-label` pair), leaving 1000 files at
 506,221 bytes. Folders gained rename and move at the same time -- they previously had neither --
 with `is_within` guarding against a move into a folder's own subtree.
+
+**Front-controller routing: done.** `fallback = "app.lhtml"` in `rc_config.lua` (or `--fallback` /
+`RC_FALLBACK`) renders that template whenever a path resolves to no file, with the original path
+in `request.path`. Real files still win, traversal is still a 403 before the fallback is reached,
+and the template must be `.lhtml` inside the serve directory -- resolved once at startup, so a
+typo is a boot error rather than a 404 page that misbehaves later. `.lhtml` is required because a
+static file cannot set its own status and would answer every unresolved path with a 200; the
+fallback defaults to 200 and owns its statuses, as a front controller should. Route *matching*
+stays in Lua: a table of patterns beats anything a config file could express. This leaves
+`--bind 0.0.0.0` and native TLS as what still separates a standalone deployment from one behind
+nginx.
+
+Drive uses it for share links only: `/s/<token>` instead of `/s.lhtml?t=<token>`, routed by
+`apps/drive/app.lhtml`, which also answers every other unresolved path with Drive's own 404
+rather than the server's bare error page. `deploy/drive.eicher.cc.adjusted` proxies `location /`
+wholesale, so no nginx change was needed. Old `?t=` links were not kept working -- deliberate,
+and the reason the deployed `deploy/var-www-drive/app` copy has to be refreshed in step.
+
+Taking the rest of Drive resource-style (`/folder/3`, `/file/7/manage`, `/archive/2.json`) was
+built and then backed out: it works, but it churns every link, form, redirect and test in the app
+for a cosmetic gain, and the routing table plus a `lib/urls.lua` of builders is more machinery
+than Drive earns today. Worth revisiting only if Drive grows pages whose query strings actually
+get unwieldy.
 
 **Subprocesses and the shell: done.** `process.run{argv}` execs directly with no shell and its own
 timeout; `fs.mkdir`/`fs.link` cover what Lua cannot do itself, confined to the data directory.

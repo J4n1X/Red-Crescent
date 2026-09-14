@@ -1,0 +1,11 @@
+<?lua
+-- Front controller: routes on the original URL path.
+local path = request.path
+if path == "/api/ping" then
+    response.headers["Content-Type"] = "application/json"
+    print(json.encode({ ok = true, method = request.method }))
+    return
+end
+response.status = 404
+?>
+no route for <?lua= path ?>

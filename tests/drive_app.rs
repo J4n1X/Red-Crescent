@@ -24,6 +24,8 @@ fn drive_config() -> Config {
         // request path gets rather than the 8 MiB test default.
         thread_memory_limit_mb: 64,
         max_upload_size: 1024 * 1024,
+        // Matches apps/drive/rc_config.lua: /s/<token> is routed, not a file.
+        fallback: Some("app.lhtml".to_string()),
         ..common::test_config("apps/drive")
     }
 }
@@ -259,15 +261,15 @@ async fn full_drive_flow() {
     assert_eq!(resp.status(), StatusCode::FOUND);
     let page =
         body_string(get(&app, &format!("/shares.lhtml?file={file_id}"), Some(&admin)).await).await;
-    let token = find_between(&page, "/s.lhtml?t=", "<")
-        .expect("share token")
-        .to_string();
+    let token = find_between(&page, "class=\"sharelink\">", "<")
+        .and_then(|link| link.rsplit("/s/").next().map(str::to_string))
+        .expect("share token");
     assert_eq!(token.len(), 32, "token: {token}");
 
     // --- The share works WITHOUT any session.
-    let page = body_string(get(&app, &format!("/s.lhtml?t={token}"), None).await).await;
+    let page = body_string(get(&app, &format!("/s/{token}"), None).await).await;
     assert!(page.contains("notes.txt"), "share page: {page}");
-    let resp = get(&app, &format!("/s.lhtml?t={token}&dl=1"), None).await;
+    let resp = get(&app, &format!("/s/{token}?dl=1"), None).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = test::read_body(resp).await;
     assert_eq!(&bytes[..], content);
@@ -284,14 +286,14 @@ async fn full_drive_flow() {
     assert_eq!(downloads, 1);
 
     // A bogus token 404s; an expired share 404s.
-    let resp = get(&app, "/s.lhtml?t=0000000000000000000000000000dead", None).await;
+    let resp = get(&app, "/s/0000000000000000000000000000dead", None).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     conn.execute(
         "UPDATE shares SET expires_at = 1 WHERE token = ?1",
         [&token],
     )
     .unwrap();
-    let resp = get(&app, &format!("/s.lhtml?t={token}"), None).await;
+    let resp = get(&app, &format!("/s/{token}"), None).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     // --- Second user: pending until the admin approves.
@@ -680,12 +682,12 @@ async fn folders_can_be_shared_publicly() {
         .await,
     )
     .await;
-    let token = find_between(&page, "/s.lhtml?t=", "<")
-        .expect("share token")
-        .to_string();
+    let token = find_between(&page, "class=\"sharelink\">", "<")
+        .and_then(|link| link.rsplit("/s/").next().map(str::to_string))
+        .expect("share token");
 
     // Anonymous browsing of the shared tree.
-    let page = body_string(get(&app, &format!("/s.lhtml?t={token}"), None).await).await;
+    let page = body_string(get(&app, &format!("/s/{token}"), None).await).await;
     assert!(page.contains("top.txt"), "share page: {page}");
     assert!(page.contains("inner"), "share page: {page}");
     assert!(
@@ -694,22 +696,21 @@ async fn folders_can_be_shared_publicly() {
     );
 
     // Descend into the subfolder and download a file, all without a session.
-    let inner_id = find_between(&page, "\u{1F4C1} <a href=\"/s.lhtml?t=", "\"")
-        .and_then(|s| s.split("f=").nth(1).map(str::to_string))
+    let inner_id = find_between(&page, "\u{1F4C1} <a href=\"/s/", "\"")
+        .and_then(|s| s.split("?f=").nth(1).map(str::to_string))
         .expect("inner folder link");
-    let page =
-        body_string(get(&app, &format!("/s.lhtml?t={token}&f={inner_id}"), None).await).await;
+    let page = body_string(get(&app, &format!("/s/{token}?f={inner_id}"), None).await).await;
     assert!(page.contains("deep.txt"), "inner page: {page}");
-    let file_id = find_between(&page, "&amp;dl=", "\"")
+    let file_id = find_between(&page, "?dl=", "\"")
         .expect("file link")
         .to_string();
-    let resp = get(&app, &format!("/s.lhtml?t={token}&dl={file_id}"), None).await;
+    let resp = get(&app, &format!("/s/{token}?dl={file_id}"), None).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(&test::read_body(resp).await[..], b"deep file");
 
     // The share is a boundary: a folder outside it is not reachable through
     // the token, even by guessing its id.
-    let resp = get(&app, &format!("/s.lhtml?t={token}&f={private_id}"), None).await;
+    let resp = get(&app, &format!("/s/{token}?f={private_id}"), None).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = body_string(resp).await;
     assert!(body.contains("not part of this share"), "body: {body}");
@@ -723,7 +724,7 @@ async fn folders_can_be_shared_publicly() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FOUND);
-    let resp = get(&app, &format!("/s.lhtml?t={token}"), None).await;
+    let resp = get(&app, &format!("/s/{token}"), None).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1180,6 +1181,36 @@ async fn concurrent_exports_queue_rather_than_fail() {
     }
 }
 
+/// The front controller owns every path that is not a file: it routes
+/// `/s/<token>` and answers the rest in Drive's own chrome.
+#[actix_web::test]
+async fn unrouted_paths_get_drives_own_404() {
+    let (app, _) = app_with(drive_config()).await;
+
+    let resp = get(&app, "/no/such/page", None).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let page = body_string(resp).await;
+    assert!(page.contains("Back to your files"), "page: {page}");
+    assert!(page.contains("/no/such/page"), "page: {page}");
+    // Rendered by Drive, so it carries the site chrome rather than the
+    // server's bare error page.
+    assert!(page.contains("🌙 Drive"), "page: {page}");
+
+    // A share-shaped path with no share behind it is the share page's 404,
+    // not the router's.
+    let resp = get(&app, "/s/0000000000000000000000000000dead", None).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(
+        body_string(resp).await.contains("Link not found"),
+        "expected the share page's own 404"
+    );
+
+    // The template is still a file, so it still resolves — but it is not a
+    // way to reach a share any more.
+    let resp = get(&app, "/s.lhtml", None).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 #[actix_web::test]
 async fn the_shares_overview_lists_and_revokes_links() {
     let (app, _data_dir) = app_with(drive_config()).await;
@@ -1239,7 +1270,7 @@ async fn the_shares_overview_lists_and_revokes_links() {
         .to_string();
 
     // The link works, then the overview revokes it by token alone.
-    let resp = get(&app, &format!("/s.lhtml?t={token}"), None).await;
+    let resp = get(&app, &format!("/s/{token}"), None).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     let resp = post_form(
@@ -1256,7 +1287,7 @@ async fn the_shares_overview_lists_and_revokes_links() {
         location(&resp)
     );
 
-    let resp = get(&app, &format!("/s.lhtml?t={token}"), None).await;
+    let resp = get(&app, &format!("/s/{token}"), None).await;
     assert_ne!(resp.status(), StatusCode::OK, "revoked link still resolves");
 
     let page = body_string(get(&app, "/shares.lhtml", Some(&admin)).await).await;
