@@ -129,3 +129,6 @@ details.tools[open] { display: block; background: #0d1b31; padding: .5rem .75rem
 .archive-notice-failed { background: #4a1a24; border-color: #a03648; }
 .archive-notice-failed strong { color: #ffb3bd; }
 .archive-notice-failed .archive-spinner { animation: none; border-top-color: #ffb3bd; }
+
+/* Token in the shares table: the panel-sized .sharelink is too heavy here. */
+.listing .sharetoken { font-family: monospace; font-size: .8rem; word-break: break-all; }

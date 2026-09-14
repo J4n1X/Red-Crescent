@@ -8,27 +8,86 @@
     local db = dbm.open()
     local user = auth.require_login(db)
 
-    -- ?file=<id> or ?folder=<id>
-    local kind, target
-    if request.query.folder and request.query.folder ~= "" then
-        kind, target = "folder", filesm.get_folder(db, user, request.query.folder)
+    -- No target means the overview: every link this user has handed out.
+    local has_target = (request.query.file and request.query.file ~= "")
+        or (request.query.folder and request.query.folder ~= "")
+
+    local kind, target, shares
+    if has_target then
+        if request.query.folder and request.query.folder ~= "" then
+            kind, target = "folder", filesm.get_folder(db, user, request.query.folder)
+        else
+            kind, target = "file", filesm.get_file(db, user, request.query.file)
+        end
+        if not target then
+            redirect("/?err=" .. util.urlencode("That item no longer exists."))
+        end
+        shares = sharesm.for_target(db, user, kind, target)
     else
-        kind, target = "file", filesm.get_file(db, user, request.query.file)
-    end
-    if not target then
-        redirect("/?err=" .. util.urlencode("That item no longer exists."))
+        shares = sharesm.all_for_user(db, user)
     end
 
-    local shares = sharesm.for_target(db, user, kind, target)
     local base = util.base_url()
+    local now = os.time()
 
-    page_title = "Share " .. target.name
+    page_title = target and ("Share " .. target.name) or "Shared links"
     current_user = user
     csrf_html = auth.csrf_field(user)
 ?>
 <?lua include("partials/header.lhtml") ?>
 
 <?lua= util.flash_html() ?>
+
+<?lua if not has_target then ?>
+
+<h1>🔗 Shared links</h1>
+<p class="meta">Every link you have handed out. Revoking one stops it working immediately.
+    · <a href="/">back to files</a></p>
+
+<?lua if #shares == 0 then ?>
+    <p class="meta">You have not shared anything yet. Use <strong>Share</strong> next to any
+    file or folder to create a link.</p>
+<?lua else ?>
+<table class="listing">
+    <tr><th>Shared item</th><th>Link</th><th>Created</th><th>Expires</th><th>Downloads</th><th class="actions">Actions</th></tr>
+    <?lua for _, share in ipairs(shares) do ?>
+        <?lua
+            local is_folder = share.folder_id ~= nil
+            local expired = share.expires_at and share.expires_at <= now
+            local target_url = is_folder
+                and ("/?folder=" .. share.folder_id)
+                or ("/download.lhtml?id=" .. share.file_id)
+            local link = base .. "/s.lhtml?t=" .. util.urlencode(share.token)
+        ?>
+        <tr>
+            <td><?lua= is_folder and "📁" or "📄" ?>
+                <a href="<?lua= target_url ?>"><?lua= html_escape(share.target_name or "(gone)") ?></a>
+                <?lua if share.file_size then ?><span class="meta">(<?lua= util.human_size(share.file_size) ?>)</span><?lua end ?>
+            </td>
+            <td><a class="sharetoken" href="<?lua= link ?>" title="<?lua= html_escape(link) ?>"><?lua= html_escape(share.token) ?></a></td>
+            <td class="meta"><?lua= util.format_time(share.created_at) ?></td>
+            <td class="meta"><?lua
+                if not share.expires_at then ?>never<?lua
+                elseif expired then ?><strong>expired</strong><?lua
+                else ?><?lua= util.format_time(share.expires_at) ?><?lua end ?></td>
+            <td class="meta"><?lua= share.downloads ?></td>
+            <td class="actions">
+                <a href="/shares.lhtml?<?lua= is_folder and "folder" or "file" ?>=<?lua= is_folder and share.folder_id or share.file_id ?>">Manage</a>
+                <form class="inline" method="post" action="/actions.lhtml"
+                      data-confirm="Revoke this link? Anyone holding it loses access.">
+                    <?lua= csrf_html ?>
+                    <input type="hidden" name="action" value="share_revoke">
+                    <input type="hidden" name="from" value="all">
+                    <input type="hidden" name="token" value="<?lua= html_escape(share.token) ?>">
+                    <button class="danger" type="submit">Revoke</button>
+                </form>
+            </td>
+        </tr>
+    <?lua end ?>
+</table>
+<?lua end ?>
+
+<?lua else ?>
 
 <h1><?lua= kind == "folder" and "📁" or "📄" ?> Share links for <?lua= html_escape(target.name) ?></h1>
 <p class="meta">
@@ -80,6 +139,8 @@
             </form>
         </div>
     <?lua end ?>
+<?lua end ?>
+
 <?lua end ?>
 
 <?lua include("partials/footer.lhtml") ?>

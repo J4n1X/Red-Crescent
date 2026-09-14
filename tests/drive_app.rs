@@ -1178,3 +1178,86 @@ async fn concurrent_exports_queue_rather_than_fail() {
         assert!(ready, "job {job} never completed");
     }
 }
+
+#[actix_web::test]
+async fn the_shares_overview_lists_and_revokes_links() {
+    let (app, _data_dir) = app_with(drive_config()).await;
+    post_form(
+        &app,
+        "/register.lhtml",
+        None,
+        "username=admin&password=adminpass1&password2=adminpass1".to_string(),
+    )
+    .await;
+    let admin = login(&app, "admin", "adminpass1").await.expect("session");
+    let csrf = csrf_of(&app, &admin).await;
+
+    // Nothing shared yet.
+    let page = body_string(get(&app, "/shares.lhtml", Some(&admin)).await).await;
+    assert!(page.contains("not shared anything yet"), "page: {page}");
+
+    let payload = multipart_body(
+        BOUNDARY,
+        &[
+            ("csrf", None, csrf.as_bytes()),
+            ("action", None, b"upload"),
+            ("folder", None, b""),
+            ("file", Some("shared.txt"), b"contents"),
+        ],
+    );
+    test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/actions.lhtml")
+            .insert_header((header::COOKIE, format!("session={admin}")))
+            .insert_header((
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            ))
+            .set_payload(payload)
+            .to_request(),
+    )
+    .await;
+
+    let page = body_string(get(&app, "/", Some(&admin)).await).await;
+    let file_id = find_between(&page, "shares.lhtml?file=", "\"").expect("a share link");
+    post_form(
+        &app,
+        "/actions.lhtml",
+        Some(&admin),
+        format!("csrf={csrf}&action=share_create&kind=file&id={file_id}&expires="),
+    )
+    .await;
+
+    // The overview names the shared item and offers the token.
+    let page = body_string(get(&app, "/shares.lhtml", Some(&admin)).await).await;
+    assert!(page.contains("shared.txt"), "page: {page}");
+    assert!(page.contains("sharetoken"), "page: {page}");
+    let token = find_between(&page, "name=\"token\" value=\"", "\"")
+        .expect("token on the overview")
+        .to_string();
+
+    // The link works, then the overview revokes it by token alone.
+    let resp = get(&app, &format!("/s.lhtml?t={token}"), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = post_form(
+        &app,
+        "/actions.lhtml",
+        Some(&admin),
+        format!("csrf={csrf}&action=share_revoke&from=all&token={token}"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    assert!(
+        location(&resp).starts_with("/shares.lhtml?"),
+        "{}",
+        location(&resp)
+    );
+
+    let resp = get(&app, &format!("/s.lhtml?t={token}"), None).await;
+    assert_ne!(resp.status(), StatusCode::OK, "revoked link still resolves");
+
+    let page = body_string(get(&app, "/shares.lhtml", Some(&admin)).await).await;
+    assert!(page.contains("not shared anything yet"), "page: {page}");
+}

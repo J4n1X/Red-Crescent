@@ -35,7 +35,7 @@ want it running from boot rather than from the first request.
 | `actions.lhtml` | POST target for all mutations (CSRF-checked), redirects back with a flash |
 | `download.lhtml` | Authenticated download of a single file via `response.send_file` |
 | `archive.lhtml` | Folder downloads: queue a job, watch it, collect the finished archive |
-| `shares.lhtml` | Create/revoke share links for one file |
+| `shares.lhtml` | All your share links, or create/revoke the ones for a single item (`?file=` / `?folder=`) |
 | `s.lhtml` | **Public** share page: a single file, or a browsable shared folder (`?t=<token>`) |
 | `login/register/logout/admin.lhtml` | Auth flow and user management |
 | `config.lua` | App settings: share-link base URL, session lifetime, archive ceilings |
