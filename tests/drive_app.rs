@@ -962,7 +962,8 @@ async fn a_changed_folder_is_never_served_a_stale_archive() {
     // A rename touches neither file count nor total size — only a fingerprint
     // that includes names catches it.
     let page = body_string(get(&app, "/", Some(&admin)).await).await;
-    let file_id = find_between(&page, "name=\"id\" value=\"", "\"").expect("a file id");
+    // Rows no longer carry forms, so the id comes from the manage link.
+    let file_id = find_between(&page, "/manage.lhtml?file=", "\"").expect("a file id");
     post_form(
         &app,
         "/actions.lhtml",
@@ -1260,4 +1261,257 @@ async fn the_shares_overview_lists_and_revokes_links() {
 
     let page = body_string(get(&app, "/shares.lhtml", Some(&admin)).await).await;
     assert!(page.contains("not shared anything yet"), "page: {page}");
+}
+
+#[actix_web::test]
+async fn the_listing_emits_one_move_select_regardless_of_row_count() {
+    let (app, _data_dir) = app_with(drive_config()).await;
+    post_form(
+        &app,
+        "/register.lhtml",
+        None,
+        "username=admin&password=adminpass1&password2=adminpass1".to_string(),
+    )
+    .await;
+    let admin = login(&app, "admin", "adminpass1").await.expect("session");
+    let csrf = csrf_of(&app, &admin).await;
+
+    for name in ["alpha", "beta", "gamma"] {
+        post_form(
+            &app,
+            "/actions.lhtml",
+            Some(&admin),
+            format!("csrf={csrf}&action=mkdir&folder=&name={name}"),
+        )
+        .await;
+    }
+    for file in ["one.txt", "two.txt", "three.txt", "four.txt"] {
+        let payload = multipart_body(
+            BOUNDARY,
+            &[
+                ("csrf", None, csrf.as_bytes()),
+                ("action", None, b"upload"),
+                ("folder", None, b""),
+                ("file", Some(file), b"data"),
+            ],
+        );
+        test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/actions.lhtml")
+                .insert_header((header::COOKIE, format!("session={admin}")))
+                .insert_header((
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                ))
+                .set_payload(payload)
+                .to_request(),
+        )
+        .await;
+    }
+
+    let page = body_string(get(&app, "/", Some(&admin)).await).await;
+    // The folder <select> used to be repeated per row, making the markup
+    // quadratic in folders. It now lives in one dialog for the whole page.
+    assert_eq!(
+        page.matches(r#"<select name="dest""#).count(),
+        1,
+        "the move select is emitted more than once"
+    );
+    assert_eq!(page.matches(r#"<dialog id="manage""#).count(), 1);
+    // One per row, folders included now that they can be renamed and moved.
+    assert_eq!(
+        page.matches("data-manage").count(),
+        7,
+        "3 folders + 4 files"
+    );
+
+    // Without JavaScript the same actions are reachable as a page.
+    let file_id = find_between(&page, "/manage.lhtml?file=", "\"").expect("a manage link");
+    let page =
+        body_string(get(&app, &format!("/manage.lhtml?file={file_id}"), Some(&admin)).await).await;
+    for action in ["rename_file", "move_file", "delete_file"] {
+        assert!(
+            page.contains(action),
+            "manage page missing {action}: {page}"
+        );
+    }
+
+    // And it is still owner-scoped.
+    let resp = get(&app, "/manage.lhtml?file=999999", Some(&admin)).await;
+    assert_eq!(resp.status(), StatusCode::FOUND);
+}
+
+#[actix_web::test]
+async fn folders_can_be_renamed_and_moved_but_never_into_themselves() {
+    let (app, _data_dir) = app_with(drive_config()).await;
+    post_form(
+        &app,
+        "/register.lhtml",
+        None,
+        "username=admin&password=adminpass1&password2=adminpass1".to_string(),
+    )
+    .await;
+    let admin = login(&app, "admin", "adminpass1").await.expect("session");
+    let csrf = csrf_of(&app, &admin).await;
+
+    let mkdir = |parent: &str, name: &str, csrf: &str| {
+        format!("csrf={csrf}&action=mkdir&folder={parent}&name={name}")
+    };
+    post_form(
+        &app,
+        "/actions.lhtml",
+        Some(&admin),
+        mkdir("", "outer", &csrf),
+    )
+    .await;
+    let page = body_string(get(&app, "/", Some(&admin)).await).await;
+    let outer = find_between(&page, "/manage.lhtml?folder=", "\"")
+        .expect("outer folder")
+        .to_string();
+    post_form(
+        &app,
+        "/actions.lhtml",
+        Some(&admin),
+        mkdir(&outer, "inner", &csrf),
+    )
+    .await;
+    let page = body_string(get(&app, &format!("/?folder={outer}"), Some(&admin)).await).await;
+    let inner = find_between(&page, "/manage.lhtml?folder=", "\"")
+        .expect("inner folder")
+        .to_string();
+
+    // Rename works.
+    post_form(
+        &app,
+        "/actions.lhtml",
+        Some(&admin),
+        format!("csrf={csrf}&action=rename_folder&id={outer}&folder=&name=renamed"),
+    )
+    .await;
+    let page = body_string(get(&app, "/", Some(&admin)).await).await;
+    assert!(page.contains("renamed"), "rename did not take: {page}");
+
+    // Into itself, and into its own descendant, are both refused — either
+    // would cut the branch loose in a cycle no listing can reach.
+    for dest in [&outer, &inner] {
+        let resp = post_form(
+            &app,
+            "/actions.lhtml",
+            Some(&admin),
+            format!("csrf={csrf}&action=move_folder&id={outer}&folder=&dest={dest}"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        assert!(
+            location(&resp).contains("cannot+be+moved") || location(&resp).contains("itself"),
+            "move into {dest} was not refused: {}",
+            location(&resp)
+        );
+    }
+
+    // The manage page never offers a destination that would make a cycle.
+    let page =
+        body_string(get(&app, &format!("/manage.lhtml?folder={outer}"), Some(&admin)).await).await;
+    assert!(
+        !page.contains(&format!("option value=\"{outer}\"")),
+        "a folder was offered as its own destination"
+    );
+    assert!(
+        !page.contains(&format!("option value=\"{inner}\"")),
+        "a descendant was offered as a destination"
+    );
+
+    // A legitimate move still works.
+    post_form(
+        &app,
+        "/actions.lhtml",
+        Some(&admin),
+        mkdir("", "target", &csrf),
+    )
+    .await;
+    let page = body_string(get(&app, "/", Some(&admin)).await).await;
+    let target = page
+        .split("/manage.lhtml?folder=")
+        .skip(1)
+        .map(|p| p.split('"').next().unwrap_or("").to_string())
+        .find(|id| id != &outer)
+        .expect("target folder");
+    let resp = post_form(
+        &app,
+        "/actions.lhtml",
+        Some(&admin),
+        format!("csrf={csrf}&action=move_folder&id={outer}&folder=&dest={target}"),
+    )
+    .await;
+    assert!(location(&resp).contains("Moved"), "{}", location(&resp));
+}
+
+#[actix_web::test]
+async fn move_destinations_show_full_paths_and_exclude_own_subtree() {
+    let (app, _data_dir) = app_with(drive_config()).await;
+    post_form(
+        &app,
+        "/register.lhtml",
+        None,
+        "username=admin&password=adminpass1&password2=adminpass1".to_string(),
+    )
+    .await;
+    let admin = login(&app, "admin", "adminpass1").await.expect("session");
+    let csrf = csrf_of(&app, &admin).await;
+
+    let mkdir =
+        |parent: &str, name: &str| format!("csrf={csrf}&action=mkdir&folder={parent}&name={name}");
+    let id_of = |page: &str, folder_query: &str| -> String {
+        find_between(page, folder_query, "\"")
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    post_form(&app, "/actions.lhtml", Some(&admin), mkdir("", "docs")).await;
+    post_form(&app, "/actions.lhtml", Some(&admin), mkdir("", "archive")).await;
+    let page = body_string(get(&app, "/", Some(&admin)).await).await;
+    // Rows are alphabetical, so archive comes first.
+    let archive = id_of(&page, "/manage.lhtml?folder=");
+    let docs = page
+        .split("/manage.lhtml?folder=")
+        .skip(1)
+        .map(|p| p.split('"').next().unwrap_or("").to_string())
+        .find(|id| id != &archive)
+        .expect("docs folder");
+
+    // The same folder name in two places: a flat list could not tell them apart.
+    post_form(&app, "/actions.lhtml", Some(&admin), mkdir(&docs, "photos")).await;
+    post_form(
+        &app,
+        "/actions.lhtml",
+        Some(&admin),
+        mkdir(&archive, "photos"),
+    )
+    .await;
+
+    let page = body_string(get(&app, "/", Some(&admin)).await).await;
+    assert!(page.contains(">/docs/photos<"), "no path label: {page}");
+    assert!(page.contains(">/archive/photos<"), "no path label: {page}");
+    assert!(
+        page.contains(r#"data-path="/docs""#),
+        "folder rows must carry their path for the dialog filter"
+    );
+
+    // Managing /docs must not offer /docs or anything beneath it.
+    let page =
+        body_string(get(&app, &format!("/manage.lhtml?folder={docs}"), Some(&admin)).await).await;
+    assert!(
+        page.contains(">/archive<"),
+        "unrelated folder missing: {page}"
+    );
+    assert!(
+        page.contains(">/archive/photos<"),
+        "unrelated folder missing"
+    );
+    assert!(!page.contains(">/docs<"), "offered itself as a destination");
+    assert!(
+        !page.contains(">/docs/photos<"),
+        "offered its own descendant"
+    );
 }

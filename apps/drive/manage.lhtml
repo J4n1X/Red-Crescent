@@ -1,0 +1,105 @@
+<?lua
+    -- Rename, move and delete for one file or folder. The listing links here
+    -- so its rows stay small; with JavaScript the same actions open a dialog
+    -- and this page is never reached.
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local filesm = require("lib.files")
+    local util = require("lib.util")
+
+    local db = dbm.open()
+    local user = auth.require_login(db)
+
+    local kind, item
+    if request.query.folder and request.query.folder ~= "" then
+        kind, item = "folder", filesm.get_folder(db, user, request.query.folder)
+    else
+        kind, item = "file", filesm.get_file(db, user, request.query.file)
+    end
+    if not item then
+        redirect("/?err=" .. util.urlencode("That item no longer exists."))
+    end
+
+    local is_folder = kind == "folder"
+    local parent_id = is_folder and item.parent_id or item.folder_id
+    local folder_param = parent_id and tostring(parent_id) or ""
+
+    -- A folder cannot be moved into itself or its own subtree, so those are
+    -- left out rather than offered and rejected.
+    local all_folders = filesm.folder_paths(db, user)
+    local own_path
+    if is_folder then
+        for _, f in ipairs(all_folders) do
+            if f.id == item.id then own_path = f.path end
+        end
+    end
+
+    local destinations = {}
+    for _, f in ipairs(all_folders) do
+        local inside_self = own_path
+            and (f.path == own_path or f.path:sub(1, #own_path + 1) == own_path .. "/")
+        if not inside_self then table.insert(destinations, f) end
+    end
+
+    page_title = "Manage " .. item.name
+    current_user = user
+    csrf_html = auth.csrf_field(user)
+?>
+<?lua include("partials/header.lhtml") ?>
+
+<?lua= util.flash_html() ?>
+
+<h1><?lua= is_folder and "📁" or "📄" ?> <?lua= html_escape(item.name) ?></h1>
+<p class="meta">
+    <?lua if is_folder then ?>
+        <a href="/?folder=<?lua= item.id ?>">open</a>
+    <?lua else ?>
+        <?lua= util.human_size(item.size) ?>
+        · <a href="/download.lhtml?id=<?lua= item.id ?>">download</a>
+    <?lua end ?>
+    · <a href="/shares.lhtml?<?lua= kind ?>=<?lua= item.id ?>">share</a>
+    · <a href="/?folder=<?lua= folder_param ?>">back to files</a>
+</p>
+
+<div class="panel">
+    <h2>Rename</h2>
+    <form class="rowform" method="post" action="/actions.lhtml">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="rename_<?lua= kind ?>">
+        <input type="hidden" name="id" value="<?lua= item.id ?>">
+        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+        <input type="text" name="name" value="<?lua= html_escape(item.name) ?>" aria-label="New name">
+        <button type="submit">Rename</button>
+    </form>
+</div>
+
+<div class="panel">
+    <h2>Move</h2>
+    <form class="rowform" method="post" action="/actions.lhtml">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="move_<?lua= kind ?>">
+        <input type="hidden" name="id" value="<?lua= item.id ?>">
+        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+        <select name="dest" aria-label="Destination folder">
+            <option value="">/ (root)</option>
+            <?lua for _, f in ipairs(destinations) do ?>
+                <option value="<?lua= f.id ?>"<?lua= f.id == parent_id and " selected" or "" ?>><?lua= html_escape(f.path) ?></option>
+            <?lua end ?>
+        </select>
+        <button type="submit">Move</button>
+    </form>
+</div>
+
+<div class="panel">
+    <h2>Delete</h2>
+    <form class="rowform" method="post" action="/actions.lhtml"
+          data-confirm="<?lua= is_folder and "Delete this folder and everything inside it?" or "Delete this file?" ?>">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="delete_<?lua= kind ?>">
+        <input type="hidden" name="id" value="<?lua= item.id ?>">
+        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+        <button class="danger" type="submit">Delete<?lua= is_folder and " folder and contents" or "" ?></button>
+    </form>
+</div>
+
+<?lua include("partials/footer.lhtml") ?>

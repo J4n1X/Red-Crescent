@@ -72,14 +72,16 @@
                 else ?><?lua= util.format_time(share.expires_at) ?><?lua end ?></td>
             <td class="meta"><?lua= share.downloads ?></td>
             <td class="actions">
-                <a href="/shares.lhtml?<?lua= is_folder and "folder" or "file" ?>=<?lua= is_folder and share.folder_id or share.file_id ?>">Manage</a>
+                <a href="/shares.lhtml?<?lua= is_folder and "folder" or "file" ?>=<?lua= is_folder and share.folder_id or share.file_id ?>"
+                   title="Manage links" aria-label="Manage links">🔗</a>
                 <form class="inline" method="post" action="/actions.lhtml"
                       data-confirm="Revoke this link? Anyone holding it loses access.">
                     <?lua= csrf_html ?>
                     <input type="hidden" name="action" value="share_revoke">
                     <input type="hidden" name="from" value="all">
                     <input type="hidden" name="token" value="<?lua= html_escape(share.token) ?>">
-                    <button class="danger" type="submit">Revoke</button>
+                    <button class="danger-icon" type="submit"
+                            title="Revoke" aria-label="Revoke">🗑</button>
                 </form>
             </td>
         </tr>

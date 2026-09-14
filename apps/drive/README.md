@@ -31,8 +31,9 @@ want it running from boot rather than from the first request.
 
 | Path | Role |
 |---|---|
-| `index.lhtml` | Folder view: breadcrumbs, listing, file & folder upload, new-folder, per-file actions |
+| `index.lhtml` | Folder view: breadcrumbs, listing, file & folder upload, new-folder, per-row actions |
 | `actions.lhtml` | POST target for all mutations (CSRF-checked), redirects back with a flash |
+| `manage.lhtml` | Rename, move and delete one file **or folder** — the no-JavaScript path for the listing's Manage icon |
 | `download.lhtml` | Authenticated download of a single file via `response.send_file` |
 | `archive.lhtml` | Folder downloads: queue a job, watch it, collect the finished archive |
 | `shares.lhtml` | All your share links, or create/revoke the ones for a single item (`?file=` / `?folder=`) |

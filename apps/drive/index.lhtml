@@ -15,8 +15,15 @@
 
     local folders, files = filesm.list(db, user, folder)
     local crumbs = filesm.breadcrumbs(db, user, folder)
-    local all_folders = filesm.all_folders(db, user)
+    local all_folders = filesm.folder_paths(db, user)
     local folder_param = folder and tostring(folder.id) or ""
+
+    -- Path of the folder on screen, so each subfolder row can name its own
+    -- subtree and the dialog can rule that subtree out as a destination.
+    local folder_path_prefix = ""
+    for _, crumb in ipairs(crumbs) do
+        folder_path_prefix = folder_path_prefix .. "/" .. crumb.name
+    end
 
     -- Folder downloads only exist if the host has an archiver.
     local archiver = require("lib.archive").detect()
@@ -48,18 +55,15 @@
             <td class="meta">—</td>
             <td class="meta"><?lua= util.format_time(sub.created_at) ?></td>
             <td class="actions">
-                <a href="/shares.lhtml?folder=<?lua= sub.id ?>">Share</a>
+                <a href="/shares.lhtml?folder=<?lua= sub.id ?>" title="Share" aria-label="Share">🔗</a>
                 <?lua if archiver then ?>
-                    <a data-archive href="/archive.lhtml?folder=<?lua= sub.id ?>">Download <?lua= archiver.ext:upper() ?></a>
+                    <a data-archive href="/archive.lhtml?folder=<?lua= sub.id ?>"
+                       title="Download" aria-label="Download">⬇</a>
                 <?lua end ?>
-                <form class="inline" method="post" action="/actions.lhtml"
-                      data-confirm="Delete folder and everything inside it?">
-                    <?lua= csrf_html ?>
-                    <input type="hidden" name="action" value="delete_folder">
-                    <input type="hidden" name="id" value="<?lua= sub.id ?>">
-                    <input type="hidden" name="folder" value="<?lua= folder_param ?>">
-                    <button class="linklike" type="submit">Delete</button>
-                </form>
+                <a href="/manage.lhtml?folder=<?lua= sub.id ?>" data-manage data-kind="folder"
+                   data-name="<?lua= html_escape(sub.name) ?>"
+                   data-path="<?lua= html_escape(folder_path_prefix .. "/" .. sub.name) ?>"
+                   title="Manage" aria-label="Manage">⚙</a>
             </td>
         </tr>
     <?lua end ?>
@@ -69,39 +73,10 @@
             <td class="meta"><?lua= util.human_size(file.size) ?></td>
             <td class="meta"><?lua= util.format_time(file.created_at) ?></td>
             <td class="actions">
-                <a href="/shares.lhtml?file=<?lua= file.id ?>">Share</a>
-                <details class="tools">
-                    <summary>&nbsp;More ▾</summary>
-                    <form class="rowform" method="post" action="/actions.lhtml">
-                        <?lua= csrf_html ?>
-                        <input type="hidden" name="action" value="rename_file">
-                        <input type="hidden" name="id" value="<?lua= file.id ?>">
-                        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
-                        <input type="text" name="name" value="<?lua= html_escape(file.name) ?>">
-                        <button type="submit">Rename</button>
-                    </form>
-                    <form class="rowform" method="post" action="/actions.lhtml">
-                        <?lua= csrf_html ?>
-                        <input type="hidden" name="action" value="move_file">
-                        <input type="hidden" name="id" value="<?lua= file.id ?>">
-                        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
-                        <select name="dest">
-                            <option value="">/ (root)</option>
-                            <?lua for _, f in ipairs(all_folders) do ?>
-                                <option value="<?lua= f.id ?>"><?lua= html_escape(f.name) ?></option>
-                            <?lua end ?>
-                        </select>
-                        <button type="submit">Move</button>
-                    </form>
-                    <form class="rowform" method="post" action="/actions.lhtml"
-                          data-confirm="Delete this file?">
-                        <?lua= csrf_html ?>
-                        <input type="hidden" name="action" value="delete_file">
-                        <input type="hidden" name="id" value="<?lua= file.id ?>">
-                        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
-                        <button class="danger" type="submit">Delete</button>
-                    </form>
-                </details>
+                <a href="/shares.lhtml?file=<?lua= file.id ?>" title="Share" aria-label="Share">🔗</a>
+                <a href="/manage.lhtml?file=<?lua= file.id ?>" data-manage
+                   data-name="<?lua= html_escape(file.name) ?>"
+                   title="Manage" aria-label="Manage">⚙</a>
             </td>
         </tr>
     <?lua end ?>
@@ -109,6 +84,40 @@
         <tr><td colspan="4" class="meta">Nothing here yet — upload something!</td></tr>
     <?lua end ?>
 </table>
+
+<dialog id="manage" class="manage">
+    <h2 class="manage-title">Manage</h2>
+    <form class="rowform" method="post" action="/actions.lhtml" data-op="rename">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="rename_file">
+        <input type="hidden" name="id" value="">
+        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+        <input type="text" name="name" value="" aria-label="New name">
+        <button type="submit">Rename</button>
+    </form>
+    <form class="rowform" method="post" action="/actions.lhtml" data-op="move">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="move_file">
+        <input type="hidden" name="id" value="">
+        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+        <select name="dest" aria-label="Destination folder">
+            <option value="" data-path="">/ (root)</option>
+            <?lua for _, f in ipairs(all_folders) do ?>
+                <option value="<?lua= f.id ?>" data-path="<?lua= html_escape(f.path) ?>"><?lua= html_escape(f.path) ?></option>
+            <?lua end ?>
+        </select>
+        <button type="submit">Move</button>
+    </form>
+    <form class="rowform" method="post" action="/actions.lhtml" data-op="delete"
+          data-confirm="Delete this file?">
+        <?lua= csrf_html ?>
+        <input type="hidden" name="action" value="delete_file">
+        <input type="hidden" name="id" value="">
+        <input type="hidden" name="folder" value="<?lua= folder_param ?>">
+        <button class="danger" type="submit">Delete</button>
+    </form>
+    <button type="button" class="linklike manage-close">Close</button>
+</dialog>
 
 <div class="panel">
     <h2>Upload</h2>
