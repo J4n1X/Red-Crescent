@@ -1,0 +1,16 @@
+<?lua
+fs.mkdir("fsprobe/deep/nest")
+local marker = server.data_dir .. "/fsprobe/deep/nest/a.txt"
+local out = assert(io.open(marker, "w"))
+out:write("linked")
+out:close()
+
+fs.link("fsprobe/deep/nest/a.txt", "fsprobe/deep/b.txt")
+local copy = io.open(server.data_dir .. "/fsprobe/deep/b.txt", "rb")
+print("linked=" .. tostring(copy ~= nil) .. ";")
+if copy then print("same=" .. tostring(copy:read("a") == "linked") .. ";") copy:close() end
+
+-- Confinement: the data directory is the boundary, as for sqlite and send_file.
+print("escape=" .. tostring(pcall(fs.mkdir, "../escaped")) .. ";")
+print("absolute=" .. tostring(pcall(fs.mkdir, "/tmp/rc-escape-probe")) .. ";")
+?>

@@ -245,6 +245,31 @@ crypto.sha256("data")                       -- hex digest
 crypto.constant_time_equals(a, b)           -- timing-safe comparison for tokens
 ```
 
+### Subprocesses and files
+
+```lua
+local r = process.run{ "zip", "-rqX", "-1", out, ".",
+                       cwd = staging, timeout = 600, capture = true }
+-- r.started (did it launch), r.ok, r.code, r.timed_out, r.stdout, r.stderr
+
+fs.mkdir("drive/tmp/stage")          -- relative to the data directory
+fs.link("drive/files/ab12", "drive/tmp/stage/report.pdf")
+```
+
+`process.run` execs a program directly with an argument vector — **no shell** — so a filename full
+of `;`, `$(...)` or quotes is one argument rather than syntax, and quoting stops being a concept
+for callers. `started = false` means the program could not be launched at all, which is a different
+answer from one that ran and failed, and is how you test for a tool's presence.
+
+It is also bounded, which `os.execute` cannot be: the instruction hook cannot fire while Lua waits
+on a child, so the `timeout` here (default 60s) is the only thing that can end a hung one. Captured
+output is held in memory and capped at 8 MiB, with the pipes still drained past that so the child
+never blocks on a full one. Pass `capture = false` when you only care about the exit status.
+
+`fs.mkdir` and `fs.link` cover the two things Lua cannot do for itself, and are confined to the
+data directory like `sqlite.open` and `send_file`. `fs.link` makes a hard link — copying no data —
+and falls back to a real copy when the destination is on another filesystem.
+
 ### Background threads
 
 A thread is just another Lua instance on its own OS thread — it owns its loop and timing:

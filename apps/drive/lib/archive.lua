@@ -12,20 +12,12 @@ local M = {}
 
 M.MAX_FILES = config.archive_max_files or 20000
 M.MAX_BYTES = config.archive_max_bytes or 8 * 1024 * 1024 * 1024
-M.SUBPROCESS_TIMEOUT = 600 -- seconds; needs coreutils `timeout`, optional
+M.SUBPROCESS_TIMEOUT = 600 -- seconds; enforced by process.run itself
 
-local function shq(s)
-    return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
-end
-M.shell_quote = shq
-
-local function run(cmd)
-    local ok = os.execute(cmd)
-    return ok == true or ok == 0
-end
-
+-- Present if the binary can be started at all; a non-zero exit still means
+-- it exists, which is the only question here.
 local function have(tool)
-    return run("command -v " .. shq(tool) .. " >/dev/null 2>&1")
+    return process.run{ tool, "--version", capture = false, timeout = 5 }.started
 end
 
 M.tmp_dir = server.data_dir .. "/drive/tmp"
@@ -40,9 +32,6 @@ function M.detect()
             detected = { name = "zip", ext = "zip", content_type = "application/zip" }
         elseif have("tar") then
             detected = { name = "tar", ext = "tar.gz", content_type = "application/gzip" }
-        end
-        if detected and have("timeout") then
-            detected.timeout = true
         end
     end
     return detected
@@ -86,28 +75,27 @@ local function collect(db, user, folder)
     return { dirs = dirs, files = files, bytes = bytes }
 end
 
--- Stages the tree with one batched shell script: one fork for the whole
--- layout instead of one per file. Hard links keep it O(1) in data volume;
--- `cp` covers filesystems that refuse links.
+-- Stages the tree with fs calls rather than a generated shell script: no
+-- filename ever becomes shell syntax, and there is no process per file.
+-- Hard links keep it O(1) in data volume; fs.link copies when it must.
 local function stage(staging, plan)
-    local script_path = staging .. ".sh"
-    local script = assert(io.open(script_path, "w"))
-    script:write("set -e\n")
-    script:write("mkdir -p -- " .. shq(staging) .. "\n")
-    for _, rel in ipairs(plan.dirs) do
-        script:write("mkdir -p -- " .. shq(staging .. "/" .. rel) .. "\n")
+    local ok, err = pcall(function()
+        fs.mkdir(staging)
+        for _, rel in ipairs(plan.dirs) do
+            fs.mkdir(staging .. "/" .. rel)
+        end
+        for _, file in ipairs(plan.files) do
+            -- A source cleaned up mid-export must not abort the archive.
+            local handle = io.open(file.src, "rb")
+            if handle then
+                handle:close()
+                fs.link(file.src, staging .. "/" .. file.rel)
+            end
+        end
+    end)
+    if not ok then
+        log.warn("drive: staging failed: " .. tostring(err))
     end
-    for _, file in ipairs(plan.files) do
-        local dest = shq(staging .. "/" .. file.rel)
-        local src = shq(file.src)
-        -- Missing source (cleaned up mid-export) must not abort the archive.
-        script:write("if [ -f " .. src .. " ]; then ln -- " .. src .. " " .. dest
-            .. " 2>/dev/null || cp -- " .. src .. " " .. dest .. "; fi\n")
-    end
-    script:close()
-
-    local ok = run("sh " .. shq(script_path))
-    os.remove(script_path)
     return ok
 end
 
@@ -122,36 +110,42 @@ function M.build(db, user, folder)
     local plan, err = collect(db, user, folder)
     if not plan then return nil, err end
 
-    if not run("mkdir -p -- " .. shq(M.tmp_dir)) then
+    if not pcall(fs.mkdir, M.tmp_dir) then
         return nil, "could not create the temporary directory"
     end
 
     local token = crypto.random_token(16)
     local staging = M.tmp_dir .. "/stage-" .. token
     local out = M.tmp_dir .. "/" .. token .. "." .. tool.ext
-    local cleanup = "rm -rf -- " .. shq(staging)
+    local function cleanup()
+        process.run{ "rm", "-rf", "--", staging, capture = false, timeout = 120 }
+    end
 
     if not stage(staging, plan) then
-        run(cleanup)
+        cleanup()
         return nil, "could not prepare the archive"
     end
 
-    -- The archiver runs inside the staging directory, so no user-controlled
-    -- name ever reaches its command line. (`out` is a server-generated token
-    -- path, hence no `--` guard — Info-ZIP rejects one before the archive.)
-    local prefix = tool.timeout and ("timeout " .. M.SUBPROCESS_TIMEOUT .. " ") or ""
-    local command
+    -- The archiver runs inside the staging directory, so only server-generated
+    -- paths reach it at all.
+    local result
     if tool.name == "zip" then
         -- -1 (fastest) on purpose: measured on 1.2 GiB of real game data,
         -- level 1 took 24s for 950 MiB against 30s for 945 MiB at the
         -- default. Compressible content still shrinks fine at level 1.
-        command = "cd " .. shq(staging) .. " && " .. prefix .. "zip -rqX -1 " .. shq(out) .. " ."
+        result = process.run{
+            "zip", "-rqX", "-1", out, ".",
+            cwd = staging, timeout = M.SUBPROCESS_TIMEOUT, capture = false,
+        }
     else
-        command = prefix .. "tar -czf " .. shq(out) .. " -C " .. shq(staging) .. " ."
+        result = process.run{
+            "tar", "-czf", out, "-C", staging, ".",
+            timeout = M.SUBPROCESS_TIMEOUT, capture = false,
+        }
     end
 
-    local ok = run(command)
-    run(cleanup)
+    local ok = result.ok
+    cleanup()
     if not ok then
         os.remove(out)
         return nil, "the archiver failed (the folder may be too large)"

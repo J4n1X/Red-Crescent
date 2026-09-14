@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use mlua::{Lua, LuaSerdeExt, MultiValue, Table, Value};
 
+use crate::fs_api;
+use crate::process_api;
 use crate::runtime::{
     ExitSignal, LuaCookie, RenderConfig, RenderState, RequestBody, RequestData, SendFileSpec,
 };
@@ -104,6 +106,8 @@ pub(crate) fn install_core(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
     // --- sqlite + crypto -------------------------------------------------
 
     sqlite_api::register(lua, &cfg.data_dir, cfg.sqlite_idle_connections)?;
+    process_api::register(lua)?;
+    fs_api::register(lua, &cfg.data_dir)?;
     crypto_api::register(lua)?;
 
     // --- background threads ----------------------------------------------

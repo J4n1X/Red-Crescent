@@ -14,10 +14,6 @@ local ARCHIVE_RETENTION_SECS = config.archive_retention or 600
 local ARCHIVE_RETENTION_MINS = math.max(1, math.floor(ARCHIVE_RETENTION_SECS / 60))
 local GRACE_SECS = 3600
 
-local function shell_quote(path)
-    return "'" .. path:gsub("'", "'\\''") .. "'"
-end
-
 local function schema_ready(db)
     return #db:query(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'") == 1
@@ -56,11 +52,13 @@ local function run_once(db)
     local files_dir = server.data_dir .. "/drive/files"
 
     -- Stored files with no DB row (older than the grace period).
-    local pipe = io.popen("find " .. shell_quote(files_dir)
-        .. " -maxdepth 1 -type f -mmin +60 2>/dev/null")
-    if pipe then
+    local listing = process.run{
+        "find", files_dir, "-maxdepth", "1", "-type", "f", "-mmin", "+60",
+        timeout = 120,
+    }
+    if listing.ok then
         local removed = 0
-        for path in pipe:lines() do
+        for path in listing.stdout:gmatch("[^\n]+") do
             local stored_name = path:match("([^/]+)$")
             if stored_name and #db:query(
                 "SELECT 1 FROM files WHERE stored_name = ?", { stored_name }) == 0 then
@@ -68,7 +66,6 @@ local function run_once(db)
                 removed = removed + 1
             end
         end
-        pipe:close()
         if removed > 0 then
             print("cleanup: removed " .. removed .. " orphaned stored files")
         end
@@ -88,17 +85,23 @@ local function run_once(db)
     end
 
     -- Stray spool files from crashed requests.
-    os.execute("find " .. shell_quote(server.data_dir .. "/.spool")
-        .. " -maxdepth 1 -type f -mmin +60 -delete 2>/dev/null")
+    process.run{
+        "find", server.data_dir .. "/.spool",
+        "-maxdepth", "1", "-type", "f", "-mmin", "+60", "-delete",
+        timeout = 120, capture = false,
+    }
 
     -- Folder-download archives (and any staging left by a crashed export).
     -- They are streamed to the client immediately after being built and can
     -- be gigabytes each, so they get a much shorter grace period than the
     -- upload spool — long enough to outlive a slow download, short enough
     -- that a few big exports cannot sit on the disk for an hour.
-    os.execute("find " .. shell_quote(server.data_dir .. "/drive/tmp")
-        .. " -mindepth 1 -maxdepth 1 -mmin +" .. ARCHIVE_RETENTION_MINS
-        .. " -exec rm -rf -- {} + 2>/dev/null")
+    process.run{
+        "find", server.data_dir .. "/drive/tmp",
+        "-mindepth", "1", "-maxdepth", "1", "-mmin", "+" .. ARCHIVE_RETENTION_MINS,
+        "-exec", "rm", "-rf", "--", "{}", "+",
+        timeout = 300, capture = false,
+    }
 end
 
 local db = sqlite.open("drive/drive.db")

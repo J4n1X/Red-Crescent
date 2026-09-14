@@ -73,21 +73,6 @@ Two design questions, both worth settling before any code:
   which is a materially different posture from anything the platform currently permits. Decide
   whether that is configuration (an allowlist of hosts) or simply accepted and documented.
 
-### A safe way to run a subprocess
-C modules are opt-in and off by default, so shelling out remains the universal escape hatch for
-any deployment that leaves them off, and Drive already leans on it in two places: `apps/drive/lib/archive.lua` runs `zip`/`tar` through `os.execute`, and
-`apps/drive/jobs/cleanup.lua` reads `find` through `io.popen`. Both hand-roll their quoting
-(`shq()` — wrap in single quotes, escape embedded ones) and both pass `--` so a name starting
-with a dash cannot be read as an option. The code is careful and, as far as I can tell, correct.
-It is also user-controlled data reaching a shell on every call, and Lua has no `escapeshellarg`
-to fall back on.
-
-The fix that removes the class of bug rather than one instance: a `process.run{argv}` that execs
-a program directly with an argument vector and no shell in between, returning exit status and
-captured output. Quoting then stops existing as a concept for callers. Open questions: does it
-take a timeout of its own (it should — see the next item), is the child killed when the request
-ends, and is the program an absolute path or looked up on `PATH`?
-
 ### The execution timeout cannot interrupt a blocking C call
 The README mentions this as a caveat; it belongs on this list because Drive is already standing
 on it. `archive.lua` gives its subprocess a 600s timeout while `apps/drive/rc_config.lua` sets
@@ -181,3 +166,11 @@ folders to a 5000-file listing now costs 20 KB rather than megabytes. Row action
 icons, which costs about 11% back (the `title` + `aria-label` pair), leaving 1000 files at
 506,221 bytes. Folders gained rename and move at the same time -- they previously had neither --
 with `is_within` guarding against a move into a folder's own subtree.
+
+**Subprocesses and the shell: done.** `process.run{argv}` execs directly with no shell and its own
+timeout; `fs.mkdir`/`fs.link` cover what Lua cannot do itself, confined to the data directory.
+Drive has no `os.execute`, `io.popen` or hand-rolled quoting left anywhere -- `shq()` is gone, and
+so is the optional dependency on coreutils `timeout(1)`, since process.run enforces its own.
+Archive staging was the last holdout: one process per file would have cost ~35s for 20000 files at
+~1.7ms a call, so it moved to fs calls instead, which is both safer and faster than the generated
+shell script it replaced.

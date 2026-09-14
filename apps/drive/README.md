@@ -72,7 +72,7 @@ idempotent per export, so a double-click cannot start a second build. Every poll
 `ensure_running`, which is where the self-healing lives: a row marked `building` with no live
 thread behind it was lost to a restart or a dead task, and is put back in line.
 
-**Folder downloads** (`lib/archive.lua`) shell out to whatever the host has, discovered at
+**Folder downloads** (`lib/archive.lua`) run whatever archiver the host has, discovered at
 runtime: `zip` if present, otherwise `tar` (`.tar.gz`), and if neither exists the feature
 simply isn't offered — no download links appear and a hand-typed archive URL returns a
 friendly message. Compression runs at level 1 on purpose: on the test data it produced
