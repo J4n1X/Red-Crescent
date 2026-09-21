@@ -83,6 +83,162 @@ on first use is worth roughly 30-40us. The "VM pooling: no" verdict below still 
 `Lua::new` half: pooling is the only thing that removes it, and it trades a structural isolation
 guarantee for it.
 
+### `_out` should be backend-dependent
+**Partly done 2026-09-21.** `_out` is now a raw `lua_CFunction` (`lua_out` in `src/api.rs`), fed by
+a thread-local that `OutputScope` in `render` points at the current request's buffer. `_out_expr`,
+`_out_raw` and `html_escape` are still mlua callbacks. The JIT/buffered variant below is untouched
+and still waiting on the LuaJIT decision. Remaining below:
+
+`_out` is an mlua callback today, ~105ns a call, and a 1000-row page makes ~8000 of them. Two
+cheaper implementations, chosen by which Lua backend is built (same 60,048-byte page):
+
+| `_out` implementation | lua54 | luajit |
+| --- | --- | --- |
+| mlua callback (today) | 1371 us | 926 us |
+| raw `lua_CFunction` | **862 us** | 320 us |
+| Lua closure buffering, flush at 64 KiB | 1457 us | **156 us** |
+
+**Default (non-JIT): a raw `lua_CFunction`** via `Lua::create_c_function`, reading the string with
+`lua_tolstring` and appending to a thread-local sink. 19-23ns a call against mlua's 105-118,
+because it skips the upvalue lookup, `callback_error_ext`, the boxed closure and argument
+marshalling. 1.6x on heavy pages for no other change. It is `unsafe`: preallocate the sink per-VM
+at state creation so the write path never allocates and has no fallible branch, use
+`UnsafeCell<Vec<u8>>` rather than `RefCell` (whose `borrow_mut` is itself the panic), and keep the
+only allocation in the occasional flush where safe Rust and `try_reserve` apply. 
+
+**JIT backends: `_out` as a Lua closure** that appends to a table and flushes to the raw sink every
+N bytes. LuaJIT inlines it into the trace, so it beats even the 23ns call. Flush cost is negligible:
+156us at 64 KiB against 156 unflushed, and still 164 at 1 KiB.
+
+*Not settled.* That holds for escape-light pages. On an escape-heavy one the buffer loses to a raw
+`_out` with fused escaping (568us vs 415us on LuaJIT), because the two cannot coexist -- see "Fuse
+escape-and-write" below. Decide against a real template.
+
+**The generated chunk does not change.** Both are just `_out(...)`; only its definition differs, so
+`template.rs` stays as is.
+
+Buffer size configurable. Subtract roughly **2x** the threshold from the effective Lua memory limit:
+the pending pieces are strings the template allocated anyway, but the table's array part is ~8 bytes
+per piece and the `table.concat` at flush allocates a new string of about the threshold size.
+
+"Flush" here means Lua buffer -> Rust `Vec`, **not** Rust -> socket, so this does not conflict with
+the streaming-responses design above. Needs the Lua backend to become a cargo feature of this crate.
+
+### html_escape should be a raw C function too
+**Not done yet.** Unlike `_out` it returns a value, so it needs an allocation (which can only
+abort, not unwind) and a decision on the non-string case: today `html_escape(nil)` is a type
+error, and a raw version either raises via `lua_error` or silently passes the value through --
+the latter is unacceptable for a security-relevant function, since `html_escape(t)` returning a
+table would reach `_out_raw` and be emitted unescaped. Design that before writing it.
+
+**Keep it raw even after escape-by-default lands.** The marginal cost is near zero: the escaper is
+already being written as a raw C function for `_out_expr`, so this is a second registration against
+the same implementation, short-circuit fast path included.
+
+The justification is forward-looking rather than measured, and should be read that way. Drive today
+has only 3 non-inline uses (2 in `util.flash_html()`, neither in a loop). But escape-by-default
+covers only `<?lua= ?>` *output sites*; anywhere an app builds HTML inside Lua -- a helper, a module
+function, a loop assembling rows -- explicit `html_escape` is the only option. And the change
+creates that pattern: `<?lua== ?>` paired with Lua-built HTML means every escape inside it is a
+manual call. An app doing that in a loop would otherwise hit a ~202ns mlua callback per value.
+
+Per-call sizing, which holds wherever it is called in bulk: as an mlua callback it costs ~202ns
+against ~137ns raw, a fixed ~65ns saving. That is a large fraction of the cost for a short filename
+and negligible for a large blob, so it qualifies because template values are usually short, not
+because escaping is cheap.
+
+The "hundreds to thousands of calls per listing" figure that originally justified this belongs to
+`_out_expr` once escape-by-default lands, not to `html_escape`. Likewise the 25% measured on LuaJIT
+(762us -> 568us on a 1000-row page) was the separate-call path that escape-by-default removes for
+inline sites. Both are kept here as the sizing for any app that *does* call `html_escape` in bulk.
+
+Taking and returning `mlua::String` instead of `String` is the smaller version of this fix and
+still worth it if the raw C route is not taken: it skips the UTF-8 validation and one allocation.
+
+### Escaping should short-circuit when nothing needs escaping
+**Done 2026-09-21.** `needs_escaping` gates both `html_escape` and `_out_expr`; the Lua binding
+hands back the same `mlua::String` when nothing needs escaping, so no allocation and no interning
+on the common path. Original reasoning: Applies to
+whichever function does the escaping -- `html_escape` today, `_out_expr` after escape-by-default. The current
+implementation walks every string, builds a new `String`, and returns a fresh Lua string that gets
+allocated and interned -- even for `report.pdf`, where the output is byte-identical to the input.
+Scan first and return the argument untouched when it contains no `&<>`, and at nine values in ten
+that is nine allocations and nine internings avoided.
+
+Measured on a 1000-row page, three escaped cells per row, one value in ten actually containing a
+special character:
+
+| escape implementation | lua54 | luajit |
+| --- | --- | --- |
+| mlua callback, always copies (today) | 1618 us | 768 us |
+| raw C, always copies | 1442 us | 572 us |
+| raw C, short-circuiting | **1279 us** | **413 us** |
+
+No unsafe required for the short-circuit itself, no ordering constraints, no backend dependency,
+no template-compiler work. It composes with everything else here.
+
+**It also dissolves the buffering-vs-fusion conflict below.** On luajit, buffered `_out` with
+short-circuiting escape is 413us against fusion's 390us, a 6% gap, so the buffered path no longer
+needs rescuing and the two designs stop competing.
+
+### Escape by default, with `<?lua== expr ?>` for raw output
+**Done 2026-09-21.** `_out_expr` escapes, `_out_raw` does not, `<?lua==` parses to
+`Segment::RawExpr`, and `print` still writes unescaped. Drive, demos and fixtures migrated
+(31 redundant `html_escape(` stripped, 22 sites moved to `<?lua==`), README updated, tests added
+for both forms plus the deliberate double-escape of the old shape. Original design:
+
+**Supersedes the escape-and-write peephole**, which existed only to recognise
+`<?lua= html_escape(x) ?>` and fuse it. If `_out_expr` escapes unconditionally there is no shape
+left to recognise: one call instead of two, no intermediate Lua string, and no compiler pattern
+matching. Twig, Jinja, Django and Rails all landed here.
+
+Today `<?lua= expr ?>` compiles to `_out_expr(expr)` and does **not** escape; the README puts the
+burden on the author ("Always `html_escape()` user input"). In Drive only 28 of 157 inline sites
+escape. "Remember to escape" is the classic XSS source, so the safety case is stronger than the
+speed case -- though the speed case is real, measured on a 1000-row page with three escaped cells
+per row:
+
+| | lua54 | luajit |
+| --- | --- | --- |
+| separate escape (today) | 1618 us | 768 us |
+| escaping inside the write | **903 us** | **390 us** |
+
+(Those figures do not yet include the short-circuit fast path below, which should add a little
+more by turning the no-escape-needed case into a straight memcpy.)
+
+**Raw output: `<?lua== expr ?>`.** Rails' convention (`<%= %>` escapes, `<%== %>` does not).
+Safe to claim because the parser branches on the single byte after `<?lua`, and `=` already means
+"expression", so `<?lua== x ?>` currently compiles the source `= x` and is a **guaranteed Lua
+syntax error**. No valid template can be relying on it, and it costs one extra byte of lookahead.
+
+Two rejected alternatives, recorded so they are not revisited:
+
+- `<?lua raw= expr ?>` **collides.** A space after `<?lua` already means "code block", and
+  `raw = x` is valid Lua assigning to a global named `raw`. Adding the form would silently
+  reinterpret such a block rather than erroring, and it needs keyword lookahead that must not
+  match `<?lua rawcount = 1 ?>`.
+- A `raw(x)` **function marker** (Twig's `|raw`, Jinja's `|safe`) needs no parser change but makes
+  rawness a property of the *value* rather than the output site, so `<?lua= raw(a) .. b ?>` either
+  fails on the concatenation or needs metamethods to survive it. Syntax applies to the whole
+  expression result and cannot be half-applied.
+
+`html_escape` stays as a Lua-visible function for building escaped strings mid-expression, but
+becomes rare, and the README's "always escape" instruction is replaced by documenting `<?lua== ?>`
+as the thing to grep for in a security review.
+
+**Drive migration: 49 of 157 sites.** 28 drop their now-redundant `html_escape(` or they will
+double-escape; ~21 need `<?lua== ?>`, and those name themselves -- `csrf_html` at 15 sites and
+`util.flash_html()` at 6. The rest are ids, numbers and formatted dates that escaping leaves
+byte-identical, and `share_url` at 5 sites gains correct `&amp;` encoding in attributes, which is
+a fix rather than a regression.
+
+### Measure the cost of building SQLite result tables
+`sqlite:query` returns every row in one Lua table, so it is one callback per query and *not* a
+callback hot path. But building that table means ~1 `create_table` and ~6 `Table::set` calls per
+row from Rust, each with its own state lock and stack manipulation: ~7000 mlua table operations
+for a 1000-row Drive listing. That is a different cost from callback overhead and a raw C function
+does not address it. Unmeasured. Worth knowing before optimising anything else on that page.
+
 ### Native TLS (rustls)
 So a standalone deployment needs no reverse proxy. Meets the "every web project needs it" bar;
 nginx currently supplies it, which is a perfectly good answer for now.
@@ -157,6 +313,30 @@ syntax is used anywhere), but on real Drive listings it is 6.71ms vs 5.54 at 10 
 6.85 at 100, 22.13 vs 24.22 at 1000, and 75.27 vs 65.13 at 5000 -- no win. Microbenchmarks say
 LuaJIT wins on loops past ~1000 iterations and is 16x faster on hot arithmetic, but a real request
 is SQLite, `gsub` and buffer writes, all of which are C. The interpreter is not the bottleneck.
+
+*Qualifier added 2026-09-21, measured.* That verdict holds for Drive pages and is wrong for pure
+text generation. Same 60,048-byte page built four ways, plus a per-call mlua callback cost:
+
+| backend | 20k short strings | 20k long | short/long | page, Lua buffer | page, via `_out` | hot loop | ns per mlua call |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| lua54 | 4688 | 3503 | **1.34** | 1135 us | 1340 us | 4216 us | 104 |
+| luajit | 2430 | 2915 | 0.83 | **177 us** | 978 us | 279 us | 120 |
+| luau | 3670 | 4043 | 0.91 | 984 us | 1415 us | 3300 us | 122 |
+| lua51 | 11887 | 10515 | 1.13 | 1865 us | -- | 2939 us | -- |
+
+Three things fall out. **5.4's short-string interning penalty is real and unique to it**: only lua54
+costs *more* for strings short enough to intern (ratio 1.34) than for longer ones holding 3x the
+data. **It is not 5.1's string design that saves LuaJIT** -- plain lua51 is 2.5x worse than lua54
+at strings -- it is the JIT. And **the two changes only pay off together**: LuaJIT via the current
+`_out` path is just 1.4x, but LuaJIT with a Lua-side buffer is 1340 -> 177 us, about **7.6x**, which
+would put us ~4x ahead of PHP's 720us on the page where we currently lose 3.3x.
+
+The mechanism is not what I first assumed. LuaJIT does **not** abort traces on these C calls --
+`jit.attach` counted 9 started, 9 completed, 0 aborted for every variant including the `_out` one.
+The cost is that an mlua callback is ~110ns on every backend and no JIT can remove it. On lua54
+that hides inside work which is slow regardless; on LuaJIT, 8000 calls x 120ns = 960us against a
+978us page, so the calls *are* the page. 
+
 
 Luau and luau-jit are out on both counts: `set_global_hook` is `#[cfg(not(feature = "luau"))]` and
 this code uses it in three places, `StdLib::IO` and `StdLib::PACKAGE` do not exist there against 58

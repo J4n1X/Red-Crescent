@@ -1,0 +1,7 @@
+<?lua local v = request.query.v or "" ?>
+esc:[<?lua= v ?>]
+raw:[<?lua== v ?>]
+num:[<?lua= 42 ?>]
+nil:[<?lua= nil ?>]
+lua:[<?lua== html_escape(v) ?>]
+dbl:[<?lua= html_escape(v) ?>]

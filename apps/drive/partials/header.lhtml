@@ -6,7 +6,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?lua= html_escape(page_title or "Drive") ?> — Drive</title>
+    <title><?lua= page_title or "Drive" ?> — Drive</title>
     <link rel="stylesheet" href="/assets/style.css">
     <script src="/assets/drive.js" defer></script>
 </head>
@@ -17,9 +17,9 @@
         <?lua if current_user then ?>
             <a href="/shares.lhtml">Shares</a>
             <?lua if current_user.is_admin == 1 then ?><a href="/admin.lhtml">Admin</a><?lua end ?>
-            <span class="who"><?lua= html_escape(current_user.username) ?></span>
+            <span class="who"><?lua= current_user.username ?></span>
             <form method="post" action="/logout.lhtml" class="inline">
-                <?lua= csrf_html or "" ?>
+                <?lua== csrf_html or "" ?>
                 <button type="submit" class="linklike">Log out</button>
             </form>
         <?lua else ?>

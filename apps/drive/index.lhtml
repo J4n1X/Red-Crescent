@@ -37,10 +37,10 @@
 ?>
 <?lua include("partials/header.lhtml") ?>
 
-<?lua= util.flash_html() ?>
+<?lua== util.flash_html() ?>
 
 <div class="crumbs">
-    <a href="/">My Files</a><?lua for _, crumb in ipairs(crumbs) do ?><span class="sep">/</span><a href="/?folder=<?lua= crumb.id ?>"><?lua= html_escape(crumb.name) ?></a><?lua end ?>
+    <a href="/">My Files</a><?lua for _, crumb in ipairs(crumbs) do ?><span class="sep">/</span><a href="/?folder=<?lua= crumb.id ?>"><?lua= crumb.name ?></a><?lua end ?>
     <?lua if archiver then ?>
         <span class="sep">·</span>
         <a data-archive href="/archive.lhtml?folder=<?lua= folder_param ?>">⬇ Download this folder as <?lua= archiver.ext:upper() ?></a>
@@ -51,7 +51,7 @@
     <tr><th>Name</th><th>Size</th><th>Added</th><th class="actions">Actions</th></tr>
     <?lua for _, sub in ipairs(folders) do ?>
         <tr>
-            <td>📁 <a href="/?folder=<?lua= sub.id ?>"><?lua= html_escape(sub.name) ?></a></td>
+            <td>📁 <a href="/?folder=<?lua= sub.id ?>"><?lua= sub.name ?></a></td>
             <td class="meta">—</td>
             <td class="meta"><?lua= util.format_time(sub.created_at) ?></td>
             <td class="actions">
@@ -61,21 +61,21 @@
                        title="Download" aria-label="Download">⬇</a>
                 <?lua end ?>
                 <a href="/manage.lhtml?folder=<?lua= sub.id ?>" data-manage data-kind="folder"
-                   data-name="<?lua= html_escape(sub.name) ?>"
-                   data-path="<?lua= html_escape(folder_path_prefix .. "/" .. sub.name) ?>"
+                   data-name="<?lua= sub.name ?>"
+                   data-path="<?lua= folder_path_prefix .. "/" .. sub.name ?>"
                    title="Manage" aria-label="Manage">⚙</a>
             </td>
         </tr>
     <?lua end ?>
     <?lua for _, file in ipairs(files) do ?>
         <tr>
-            <td>📄 <a href="/download.lhtml?id=<?lua= file.id ?>"><?lua= html_escape(file.name) ?></a></td>
+            <td>📄 <a href="/download.lhtml?id=<?lua= file.id ?>"><?lua= file.name ?></a></td>
             <td class="meta"><?lua= util.human_size(file.size) ?></td>
             <td class="meta"><?lua= util.format_time(file.created_at) ?></td>
             <td class="actions">
                 <a href="/shares.lhtml?file=<?lua= file.id ?>" title="Share" aria-label="Share">🔗</a>
                 <a href="/manage.lhtml?file=<?lua= file.id ?>" data-manage
-                   data-name="<?lua= html_escape(file.name) ?>"
+                   data-name="<?lua= file.name ?>"
                    title="Manage" aria-label="Manage">⚙</a>
             </td>
         </tr>
@@ -88,7 +88,7 @@
 <dialog id="manage" class="manage">
     <h2 class="manage-title">Manage</h2>
     <form class="rowform" method="post" action="/actions.lhtml" data-op="rename">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="rename_file">
         <input type="hidden" name="id" value="">
         <input type="hidden" name="folder" value="<?lua= folder_param ?>">
@@ -96,21 +96,21 @@
         <button type="submit">Rename</button>
     </form>
     <form class="rowform" method="post" action="/actions.lhtml" data-op="move">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="move_file">
         <input type="hidden" name="id" value="">
         <input type="hidden" name="folder" value="<?lua= folder_param ?>">
         <select name="dest" aria-label="Destination folder">
             <option value="" data-path="">/ (root)</option>
             <?lua for _, f in ipairs(all_folders) do ?>
-                <option value="<?lua= f.id ?>" data-path="<?lua= html_escape(f.path) ?>"><?lua= html_escape(f.path) ?></option>
+                <option value="<?lua= f.id ?>" data-path="<?lua= f.path ?>"><?lua= f.path ?></option>
             <?lua end ?>
         </select>
         <button type="submit">Move</button>
     </form>
     <form class="rowform" method="post" action="/actions.lhtml" data-op="delete"
           data-confirm="Delete this file?">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="delete_file">
         <input type="hidden" name="id" value="">
         <input type="hidden" name="folder" value="<?lua= folder_param ?>">
@@ -123,7 +123,7 @@
     <h2>Upload</h2>
     <form class="rowform" method="post" action="/actions.lhtml" enctype="multipart/form-data"
           data-upload data-max-size="<?lua= util.human_size(server.max_upload_size) ?>">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="upload">
         <input type="hidden" name="folder" value="<?lua= folder_param ?>">
         <input type="file" name="file" multiple required>
@@ -131,7 +131,7 @@
     </form>
     <form class="rowform" method="post" action="/actions.lhtml" enctype="multipart/form-data"
           data-upload data-max-size="<?lua= util.human_size(server.max_upload_size) ?>">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="upload">
         <input type="hidden" name="folder" value="<?lua= folder_param ?>">
         <input type="file" name="file" webkitdirectory multiple required>
@@ -150,7 +150,7 @@
 <div class="panel">
     <h2>New folder</h2>
     <form class="rowform" method="post" action="/actions.lhtml">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="mkdir">
         <input type="hidden" name="folder" value="<?lua= folder_param ?>">
         <input type="text" name="name" placeholder="Folder name" required>

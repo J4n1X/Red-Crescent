@@ -56,6 +56,8 @@ pub struct RenderConfig {
     pub limits: Limits,
     /// Request-size limits, surfaced to Lua so apps can show them in forms.
     pub max_body_size: usize,
+    /// Page output buffered in Lua before draining; JIT backends only.
+    pub output_buffer_bytes: usize,
     pub max_upload_size: usize,
     pub max_upload_files: usize,
     /// Which named background threads are alive, process-wide.
@@ -254,6 +256,8 @@ pub fn render(
         .map_err(|e| RenderError::Lua(format!("failed to set memory limit: {e}")))?;
 
     let state = Rc::new(RenderState::new());
+    // Points the raw `_out` at this request's buffer; restored on drop.
+    let _out_scope = api::OutputScope::new(&state);
 
     let deadline = Instant::now() + cfg.limits.timeout;
     {
@@ -280,6 +284,14 @@ pub fn render(
         .cache
         .chunk(&lua, &template)
         .and_then(|chunk| chunk.call::<()>(()));
+
+    // On a JIT backend `_out` accumulates in Lua, so drain whatever is left
+    // before the body is read. Runs whatever the outcome: exit() and
+    // redirect() unwind through here and still keep their output.
+    #[cfg(feature = "luajit")]
+    if let Ok(flush) = lua.named_registry_value::<mlua::Function>(api::OUT_FLUSH_KEY) {
+        let _ = flush.call::<()>(());
+    }
 
     // The flag catches timeouts even when a script pcall swallowed the signal.
     if state.timed_out.get() {

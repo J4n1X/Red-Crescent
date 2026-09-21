@@ -36,7 +36,7 @@
 ?>
 <?lua include("partials/header.lhtml") ?>
 
-<?lua= util.flash_html() ?>
+<?lua== util.flash_html() ?>
 
 <?lua if not has_target then ?>
 
@@ -61,10 +61,10 @@
         ?>
         <tr>
             <td><?lua= is_folder and "📁" or "📄" ?>
-                <a href="<?lua= target_url ?>"><?lua= html_escape(share.target_name or "(gone)") ?></a>
+                <a href="<?lua= target_url ?>"><?lua= share.target_name or "(gone)" ?></a>
                 <?lua if share.file_size then ?><span class="meta">(<?lua= util.human_size(share.file_size) ?>)</span><?lua end ?>
             </td>
-            <td><a class="sharetoken" href="<?lua= link ?>" title="<?lua= html_escape(link) ?>"><?lua= html_escape(share.token) ?></a></td>
+            <td><a class="sharetoken" href="<?lua= link ?>" title="<?lua= link ?>"><?lua= share.token ?></a></td>
             <td class="meta"><?lua= util.format_time(share.created_at) ?></td>
             <td class="meta"><?lua
                 if not share.expires_at then ?>never<?lua
@@ -76,10 +76,10 @@
                    title="Manage links" aria-label="Manage links">🔗</a>
                 <form class="inline" method="post" action="/actions.lhtml"
                       data-confirm="Revoke this link? Anyone holding it loses access.">
-                    <?lua= csrf_html ?>
+                    <?lua== csrf_html ?>
                     <input type="hidden" name="action" value="share_revoke">
                     <input type="hidden" name="from" value="all">
-                    <input type="hidden" name="token" value="<?lua= html_escape(share.token) ?>">
+                    <input type="hidden" name="token" value="<?lua= share.token ?>">
                     <button class="danger-icon" type="submit"
                             title="Revoke" aria-label="Revoke">🗑</button>
                 </form>
@@ -91,7 +91,7 @@
 
 <?lua else ?>
 
-<h1><?lua= kind == "folder" and "📁" or "📄" ?> Share links for <?lua= html_escape(target.name) ?></h1>
+<h1><?lua= kind == "folder" and "📁" or "📄" ?> Share links for <?lua= target.name ?></h1>
 <p class="meta">
     <?lua if kind == "folder" then ?>
         Anyone with a link can browse this folder and download what is inside it.
@@ -106,7 +106,7 @@
 <div class="panel">
     <h2>Create a new link</h2>
     <form class="rowform" method="post" action="/actions.lhtml">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="share_create">
         <input type="hidden" name="kind" value="<?lua= kind ?>">
         <input type="hidden" name="id" value="<?lua= target.id ?>">
@@ -132,11 +132,11 @@
                 · <?lua if share.expires_at then ?>expires <?lua= util.format_time(share.expires_at) ?><?lua else ?>never expires<?lua end ?>
             </p>
             <form class="inline" method="post" action="/actions.lhtml">
-                <?lua= csrf_html ?>
+                <?lua== csrf_html ?>
                 <input type="hidden" name="action" value="share_revoke">
                 <input type="hidden" name="kind" value="<?lua= kind ?>">
                 <input type="hidden" name="id" value="<?lua= target.id ?>">
-                <input type="hidden" name="token" value="<?lua= html_escape(share.token) ?>">
+                <input type="hidden" name="token" value="<?lua= share.token ?>">
                 <button class="danger" type="submit">Revoke</button>
             </form>
         </div>

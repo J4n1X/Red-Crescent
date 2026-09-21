@@ -4,6 +4,14 @@ version = "0.2.0"
 edition = "2024"
 
 [features]
+default = ["lua54"]
+
+# Which Lua the server embeds. Exactly one must be on. `lua54` is the default
+# and what the project targets; `luajit` exists so the JIT-specific output path
+# can be built and measured. See POOLING-PLAN.md.
+lua54 = ["mlua/lua54"]
+luajit = ["mlua/luajit"]
+
 # Native Lua C modules need the binary to export its statically linked Lua C
 # API (build.rs adds -rdynamic). Off by default; `--features c-modules` to
 # build a binary that can load them. build.rs, the startup guard in main.rs
@@ -24,7 +32,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = "0.3"
 getrandom = "0.4"
 log = "0.4.29"
-mlua = { version = "0.11.5", features = ["lua54", "serde", "vendored"] }
+mlua = { version = "0.11.5", features = ["serde", "vendored"] }
 percent-encoding = "2"
 pretty_env_logger = "0.5.0"
 rusqlite = { version = "0.40", features = ["bundled"] }

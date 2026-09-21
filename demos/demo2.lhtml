@@ -219,15 +219,15 @@
                 </tr>
                 <tr>
                     <td><code>&lt;script&gt;alert('XSS')&lt;/script&gt;</code></td>
-                    <td><?lua= html_escape("<script>alert('XSS')</script>") ?></td>
+                    <td><?lua= "<script>alert('XSS')</script>" ?></td>
                 </tr>
                 <tr>
                     <td><code>&lt;img src=x onerror=alert(1)&gt;</code></td>
-                    <td><?lua= html_escape("<img src=x onerror=alert(1)>") ?></td>
+                    <td><?lua= "<img src=x onerror=alert(1)>" ?></td>
                 </tr>
                 <tr>
                     <td><code>A &amp; B &lt; C &gt; D</code></td>
-                    <td><?lua= html_escape("A & B < C > D") ?></td>
+                    <td><?lua= "A & B < C > D" ?></td>
                 </tr>
             </table>
             

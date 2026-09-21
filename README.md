@@ -5,7 +5,7 @@ Its intended purpose is to be used behind another webserver such as Nginx or Apa
 
 ## Features
 
-- **🌙 Lua templating**: Embed Lua in HTML with `<?lua ... ?>` blocks and `<?lua= expr ?>` inline expressions
+- **🌙 Lua templating**: Embed Lua in HTML with `<?lua ... ?>` blocks and `<?lua= expr ?>` inline expressions, **HTML-escaped by default**
 - **🔀 Real control flow**: Loops and conditionals span blocks, PHP-style: `<?lua for ... do ?> <li>...</li> <?lua end ?>`
 - **📋 Request API**: Method, path, headers (case-insensitive), query params (incl. repeated), cookies, form/JSON bodies, **multipart file uploads**
 - **⚙️ Response control**: Status codes, headers, cookies, `redirect()`/`exit()`, and `response.send_file()` for efficient downloads
@@ -86,6 +86,7 @@ All options as flags and environment variables (`--help` for the full list):
 | `--timeout-ms` | `RC_TIMEOUT_MS` | `5000` | Lua execution time limit per request |
 | `--memory-limit-mb` | `RC_MEMORY_LIMIT_MB` | `64` | Lua memory limit per request |
 | `--max-body-size` | `RC_MAX_BODY_SIZE` | `1048576` | Non-multipart body cap in bytes (413 beyond) |
+| `--output-buffer-bytes` | `RC_OUTPUT_BUFFER_BYTES` | `65536` | Page output held in Lua before draining; JIT builds only, ignored otherwise |
 | `--data-dir` | `RC_DATA_DIR` | `./data` | Writable sandbox for sqlite/uploads/send_file (must not be inside the serve dir) |
 | `--max-upload-size` | `RC_MAX_UPLOAD_SIZE` | `268435456` | Total multipart upload cap in bytes |
 | `--max-upload-files` | `RC_MAX_UPLOAD_FILES` | `256` | Max file parts per multipart request |
@@ -167,7 +168,11 @@ Create a `.lhtml` file in the serve directory:
 ```
 
 - `<?lua ... ?>` runs statements. Use `print(...)` to write output.
-- `<?lua= expr ?>` writes the expression's value (nothing for `nil`).
+- `<?lua= expr ?>` writes the expression's value, **HTML-escaped** (nothing for `nil`).
+- `<?lua== expr ?>` writes it **unescaped**, for markup you built deliberately. This is the one
+  thing to look for in a security review, so keep it rare.
+- `print(...)` inside a `<?lua ... ?>` block does **not** escape, since it is how you emit markup
+  you assembled yourself. Escape the values going into it with `html_escape()`.
 - The whole file compiles to **one Lua chunk**: locals and control structures span blocks, and a top-level `return` stops rendering (like PHP's `exit`).
 - A `?>` inside a Lua string or long bracket does not close the block. A `?>` inside a *comment* doesn't either — put the closing marker on its own line if a block ends with a comment.
 - Error messages point at the real `.lhtml` file and line number.
@@ -412,7 +417,19 @@ server.max_upload_files
 server.max_body_size
 ```
 
-**Always `html_escape()` user input before writing it into HTML.**
+`<?lua= expr ?>` escapes for you, so `html_escape()` is only needed for HTML you assemble in Lua
+and then emit with `print(...)` or `<?lua== ... ?>`:
+
+```lua
+-- escaping happens automatically here
+<?lua= user.name ?>
+
+-- but not here, so escape the parts yourself
+print('<b>' .. html_escape(user.name) .. '</b>')
+```
+
+**Anything written through `<?lua== ... ?>` or `print(...)` is unescaped, and user input reaching
+either one unescaped is an XSS hole.**
 
 ## Security Model
 

@@ -1,0 +1,8 @@
+<?lua
+-- Interleaves all three output paths so a buffering backend that drained them
+-- out of order, or dropped a flush, would produce a mismatch rather than just
+-- a slower page. Total is far larger than the test buffer threshold.
+for i = 1, 400 do
+?>L<?lua= i ?>|<?lua== "R" ?><?lua print("P" .. i) ?>;
+<?lua end ?>
+END
