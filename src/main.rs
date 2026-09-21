@@ -145,6 +145,16 @@ async fn main() -> std::io::Result<()> {
             .default_service(web::route().to(handler))
     })
     .workers(config.workers)
+    // Streamed bodies (static files, send_file) write headers and data
+    // separately; without TCP_NODELAY the second write waits ~40ms for the
+    // client's delayed ACK on every kept-alive connection.
+    .on_connect(|conn, _ext| {
+        if let Some(stream) = conn.downcast_ref::<actix_web::rt::net::TcpStream>()
+            && let Err(e) = stream.set_nodelay(true)
+        {
+            log::debug!("failed to set TCP_NODELAY: {e}");
+        }
+    })
     .bind(&config.bind)?
     .run()
     .await

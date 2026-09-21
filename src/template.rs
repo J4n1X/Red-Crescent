@@ -8,10 +8,11 @@
 //! chunk on the same line number as in the source file, so Lua error messages
 //! point at real `.lhtml` lines.
 
+use mlua::{Function, Lua};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,11 +283,17 @@ fn escape_lua_string_into(out: &mut String, text: &str) {
     }
 }
 
-/// A template compiled to a Lua chunk, plus the file metadata it was built from.
-pub struct CompiledTemplate {
+/// A file compiled to a Lua chunk, plus the metadata it was built from.
+/// Either a `.lhtml` template or a `.lua` module — they differ only in how the
+/// file text becomes Lua, and from here on both are just chunks.
+pub struct CompiledChunk {
     /// Chunk name in mlua's `@file` convention, so errors read `file:line: msg`.
     pub chunk_name: String,
     pub lua_source: String,
+    /// Bytecode, dumped by whichever request compiles this chunk first.
+    /// Filled here rather than at load time because a dump needs a Lua state,
+    /// which the cache has no business owning.
+    bytecode: OnceLock<Vec<u8>>,
     mtime: Option<SystemTime>,
     len: u64,
 }
@@ -296,7 +303,7 @@ pub struct CompiledTemplate {
 /// and re-compiles the file.
 pub struct TemplateCache {
     enabled: bool,
-    map: RwLock<HashMap<PathBuf, Arc<CompiledTemplate>>>,
+    map: RwLock<HashMap<PathBuf, Arc<CompiledChunk>>>,
 }
 
 impl TemplateCache {
@@ -307,13 +314,59 @@ impl TemplateCache {
         }
     }
 
-    /// Load (or fetch from cache) the compiled form of the template at `abs`.
-    /// `display_name` is the serve-dir-relative path used in error messages.
+    /// Load `template`'s chunk into `lua`.
+    ///
+    /// The cache holds generated *source*, and re-parsing it per request costs
+    /// more than running it once a template gets large. So the first request to
+    /// reach one dumps the compiled chunk and every later request loads that
+    /// instead. Bytecode carries its own chunk name, so `set_name` is a no-op on
+    /// the fast path and the name has to be set here, before the dump.
+    pub(crate) fn chunk(&self, lua: &Lua, template: &CompiledChunk) -> mlua::Result<Function> {
+        if let Some(bytecode) = template.bytecode.get() {
+            return lua.load(bytecode.as_slice()).into_function();
+        }
+        let function = lua
+            .load(template.lua_source.as_str())
+            .set_name(template.chunk_name.clone())
+            .into_function()?;
+        if self.enabled {
+            // Debug info is kept. Stripping it saved ~1.5KB on a 20KB template
+            // and no measurable load time, but cost every error after the first
+            // its `file:line` — and the log carries those outside dev mode too.
+            // Concurrent misses both compile; the first dump wins, the rest drop.
+            let _ = template.bytecode.set(function.dump(false));
+        }
+        Ok(function)
+    }
+
+    /// Load (or fetch from cache) the template at `abs`, compiled to a Lua
+    /// chunk. `display_name` is the serve-dir-relative path used in errors.
     pub fn load(
         &self,
         abs: &Path,
         display_name: &str,
-    ) -> Result<Arc<CompiledTemplate>, TemplateError> {
+    ) -> Result<Arc<CompiledChunk>, TemplateError> {
+        self.get_or_compile(abs, display_name, |text| Ok(generate(&parse(text)?)))
+    }
+
+    /// Load (or fetch from cache) the `.lua` module at `abs`. A module is
+    /// already Lua, so it is cached for its bytecode rather than for a rewrite:
+    /// every request gets a fresh state with an empty `package.loaded`, and
+    /// without this each one re-reads and re-parses the file.
+    pub(crate) fn load_module(
+        &self,
+        abs: &Path,
+        display_name: &str,
+    ) -> Result<Arc<CompiledChunk>, TemplateError> {
+        self.get_or_compile(abs, display_name, |text| Ok(text.to_string()))
+    }
+
+    fn get_or_compile(
+        &self,
+        abs: &Path,
+        display_name: &str,
+        to_lua: impl FnOnce(&str) -> Result<String, TemplateError>,
+    ) -> Result<Arc<CompiledChunk>, TemplateError> {
         let meta = std::fs::metadata(abs).map_err(io_to_template_error)?;
         let mtime = meta.modified().ok();
         let len = meta.len();
@@ -330,11 +383,11 @@ impl TemplateCache {
             return Ok(Arc::clone(cached));
         }
 
-        let source = std::fs::read_to_string(abs).map_err(io_to_template_error)?;
-        let segments = parse(&source)?;
-        let compiled = Arc::new(CompiledTemplate {
+        let text = std::fs::read_to_string(abs).map_err(io_to_template_error)?;
+        let compiled = Arc::new(CompiledChunk {
             chunk_name: format!("@{display_name}"),
-            lua_source: generate(&segments),
+            lua_source: to_lua(&text)?,
+            bytecode: OnceLock::new(),
             mtime,
             len,
         });
@@ -360,6 +413,8 @@ fn io_to_template_error(e: std::io::Error) -> TemplateError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn html(text: &str, line: u32) -> Segment {
         Segment::Html {
@@ -378,6 +433,125 @@ mod tests {
             code: code_.to_string(),
             line,
         }
+    }
+
+    /// A state with the output hooks a generated chunk calls, and nothing else.
+    fn stub_lua() -> Lua {
+        let lua = Lua::new();
+        let noop = lua
+            .create_function(|_, _: mlua::MultiValue| Ok(()))
+            .unwrap();
+        lua.globals().set("_out", noop.clone()).unwrap();
+        lua.globals().set("_out_expr", noop).unwrap();
+        lua
+    }
+
+    fn write_template(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn reuses_dumped_bytecode_across_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_template(dir.path(), "p.lhtml", "<?lua= 6 * 7 ?>");
+        let cache = TemplateCache::new(true);
+        let template = cache.load(&path, "p.lhtml").unwrap();
+        assert!(template.bytecode.get().is_none(), "nothing dumped yet");
+
+        // First state compiles from source and leaves the dump behind.
+        let first = stub_lua();
+        cache.chunk(&first, &template).unwrap();
+        assert!(template.bytecode.get().is_some(), "dump not cached");
+
+        // A second, independent state must run that bytecode against its own
+        // globals — the whole point, since every request gets a fresh Lua.
+        let second = stub_lua();
+        let seen = Rc::new(RefCell::new(String::new()));
+        let sink = Rc::clone(&seen);
+        second
+            .globals()
+            .set(
+                "_out_expr",
+                second
+                    .create_function(move |_, v: i64| {
+                        sink.borrow_mut().push_str(&v.to_string());
+                        Ok(())
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+        cache
+            .chunk(&second, &template)
+            .unwrap()
+            .call::<()>(())
+            .unwrap();
+        assert_eq!(seen.borrow().as_str(), "42");
+    }
+
+    #[test]
+    fn modules_are_cached_as_bytecode_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_template(dir.path(), "m.lua", "return 7");
+        let cache = TemplateCache::new(true);
+        let module = cache.load_module(&path, "m.lua").unwrap();
+        // A module is Lua already, so the source passes through unrewritten.
+        assert_eq!(module.lua_source, "return 7");
+        assert!(module.bytecode.get().is_none());
+
+        let first = stub_lua();
+        let value: i64 = cache.chunk(&first, &module).unwrap().call(()).unwrap();
+        assert_eq!(value, 7);
+        assert!(module.bytecode.get().is_some(), "module dump not cached");
+
+        // Every request builds its own state; the dump is what they share.
+        let second = stub_lua();
+        let value: i64 = cache.chunk(&second, &module).unwrap().call(()).unwrap();
+        assert_eq!(value, 7);
+    }
+
+    #[test]
+    fn errors_keep_file_and_line_whether_cached_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_template(dir.path(), "e.lhtml", "a\nb\n<?lua error('boom') ?>");
+        for enabled in [false, true] {
+            let cache = TemplateCache::new(enabled);
+            let template = cache.load(&path, "e.lhtml").unwrap();
+            let lua = stub_lua();
+            let err = cache
+                .chunk(&lua, &template)
+                .unwrap()
+                .call::<()>(())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("boom"), "enabled={enabled}: {err}");
+            assert!(
+                err.contains("e.lhtml:3"),
+                "enabled={enabled} lost file:line: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_changed_file_drops_the_cached_bytecode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_template(dir.path(), "c.lhtml", "one");
+        let cache = TemplateCache::new(true);
+        let lua = stub_lua();
+        let first = cache.load(&path, "c.lhtml").unwrap();
+        cache.chunk(&lua, &first).unwrap();
+        assert!(first.bytecode.get().is_some());
+
+        // Same length, later mtime: the entry must be rebuilt, not reused.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&path, "two").unwrap();
+        let second = cache.load(&path, "c.lhtml").unwrap();
+        assert!(second.lua_source.contains("two"));
+        assert!(
+            second.bytecode.get().is_none(),
+            "stale bytecode carried over"
+        );
     }
 
     #[test]

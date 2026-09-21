@@ -73,6 +73,16 @@ Two properties to accept before starting, neither fixable:
 
 Touches the core request path: `web.rs` (spawn, select on first message), `runtime.rs` (sender and
 flush plumbing), `api.rs` (`flush()` and the post-commit guards), plus tests.
+### Per-request fixed cost: the heavy API tables
+Measured 2026-09-21 (release, in-process, avg of 2000): `Lua::new` 57us, `api::install` 64us,
+teardown ~45us -- about 170us before a template runs. Template and module parsing are both cached
+as bytecode now (see the two "bytecode cache" entries below), so what is left of the fixed cost is
+`install`: `sqlite`, `crypto`, `fs`, `process` and `thread` are built on every request and most
+pages touch none of them. Registering them behind an `__index` on the globals so they materialise
+on first use is worth roughly 30-40us. The "VM pooling: no" verdict below still stands for the
+`Lua::new` half: pooling is the only thing that removes it, and it trades a structural isolation
+guarantee for it.
+
 ### Native TLS (rustls)
 So a standalone deployment needs no reverse proxy. Meets the "every web project needs it" bar;
 nginx currently supplies it, which is a perfectly good answer for now.
@@ -174,6 +184,81 @@ folders to a 5000-file listing now costs 20 KB rather than megabytes. Row action
 icons, which costs about 11% back (the `title` + `aria-label` pair), leaving 1000 files at
 506,221 bytes. Folders gained rename and move at the same time -- they previously had neither --
 with `is_within` guarding against a move into a folder's own subtree.
+
+**Trimming the standard libraries: no, measured.** Opening fewer libraries in `new_lua` looked
+like the one lever on VM creation that does not involve pooling. It is not. A state with
+`StdLib::NONE` still costs 19.1us to create and drop, against 56.6us for `ALL_SAFE`, so the
+libraries are only ~37us of it and the floor stays high whatever you drop. Of the seven lua54
+libraries, `coroutine` is the only one nothing uses -- worth 2-4us. `io` is used by Drive's
+`lib/archive.lua` and `jobs/cleanup.lua`, `os.date`/`os.time`/`os.remove` appear 46 times across
+demos and apps, `package` is what `require` runs on, and string/table/math are not negotiable. So
+the reachable saving is a few microseconds out of a 171us request, in exchange for a breaking
+change to the Lua surface. Not worth it.
+
+**Where a request actually goes (2026-09-21, release, `api.lhtml`, avg of 3000).** Measured by
+instrumenting each phase of `render` rather than by differencing, which is what made an earlier
+pass misattribute the teardown:
+
+| phase | us | share |
+| --- | --- | --- |
+| `Lua::new` | 66.1 | 39% |
+| `api::install` | 45.0 | 26% |
+| `drop(lua)` | 24.5 | 14% |
+| execute template | 22.1 | 13% |
+| load bytecode | 7.5 | 4% |
+| cache lookup (a stat) | 3.7 | 2% |
+| response extraction | 2.0 | 1% |
+| memory limit + state + hook | 0.2 | 0% |
+| **total** | **171.1** | |
+
+Creating and dropping the VM is 90.6us, 53% of the request and more than everything else combined.
+Outside the VM, install and the template itself there is only ~13us left, so there is no cheap win
+in the plumbing. `include()` costs 6.71us per call (a canonicalize, a stat, the map lookup, loading
+the bytecode into this state, then the call) and nothing is memoized per request, so a partial
+included in a loop pays it every iteration -- 101 includes measured 819us against 149us for one.
+Drive includes only a header and footer per page, so this costs it ~13us; it would only be worth a
+`HashMap<PathBuf, Function>` on `RenderState` if a page ever includes per row.
+
+**Module bytecode cache: done, measured.** `require` was wired to Lua's stock searcher through
+`package.path`, and since every request gets a fresh state with an empty `package.loaded`, each one
+re-opened, re-read and re-parsed every module it used -- 62us for `demos/utils.lua` on a cold state.
+`package.searchers[2]` is now a Rust function (`search_lua_module` in `src/api.rs`) over the same
+cache the templates use, so a module is parsed once per process and later requests load its
+bytecode. `/` (which does `require("utils")`) went 6,884 -> 7,498 rps at 64 connections; endpoints
+that require nothing are unchanged. The C searcher at slot 3 is untouched, so `--c-module-dir`
+still works -- covered by `a_real_system_c_module_loads` under `--features c-modules`.
+
+The stock contract is preserved deliberately: the same `?.lua` then `?/init.lua` order, dots
+becoming directory separators, a loader plus its filename on success, and a `no file '...'` line
+per path tried on failure so `require`'s own "module not found" message stays as useful as before.
+
+It also closed a hole. The stock searcher resolves through symlinks, so a link inside the serve
+directory pointing outside it was loadable as a module; the replacement canonicalizes and checks
+the result against the serve directory, which is the rule `include()` already applied.
+`require_refuses_a_module_symlinked_out_of_the_serve_dir` covers it and was checked to fail
+without the check.
+
+**Template bytecode cache: done, measured.** `TemplateCache` stored generated Lua *source* and
+re-parsed it on every request. It now dumps the compiled chunk on first use (`OnceLock<Vec<u8>>` on
+the cached entry, filled by whichever request compiles it first) and later requests load that.
+Per-request chunk load: `api.lhtml` 16.8us -> 3.4us, `index.lhtml` 23.2 -> 3.1, `demo.lhtml` 212.7
+-> 24.7; the one-time dump costs 1.4-6us. End to end at 64 connections: `/api.lhtml` 13,623 ->
+15,833 rps, `/demo.lhtml` 4,200 -> 5,050, `/` 6,641 -> 6,745. The gain scales with template size,
+so small endpoints barely move.
+
+Three things that are easy to get wrong here. Bytecode carries its own chunk name, so `set_name` is
+a no-op when loading binary and the name has to be set before the dump. A dump made on one VM loads
+into any other VM on any thread and rebinds `_ENV` to that VM's globals, which is what makes one
+dump serve every request.
+
+And **dumps keep their debug info** — `dump(false)`, deliberately, in every mode. Stripping was
+tried and removed: it saves 120B on `api.lhtml` and 1549B on the 20KB `demo.lhtml`, with a
+load-time difference inside the noise (twice measured negative), and in exchange it destroys error
+locations. Because only the first request after a restart compiles from source, a stripped build
+logs the same failing template two different ways — `boom.lhtml:3: attempt to index a nil value
+(local 't')` once, then `?:-1: attempt to index a nil value` forever after. The log carries that
+detail outside dev mode too (`render_error_response` logs in full while the browser gets a generic
+page), so it is exactly what a production bug report is read from. Not worth 1.5KB.
 
 **Front-controller routing: done.** `fallback = "app.lhtml"` in `rc_config.lua` (or `--fallback` /
 `RC_FALLBACK`) renders that template whenever a path resolves to no file, with the original path

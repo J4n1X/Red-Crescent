@@ -1,0 +1,1 @@
+<?lua local ok, err = pcall(require, "nope.missing") ?><?lua= tostring(err) ?>
