@@ -276,10 +276,10 @@ pub fn render(
 
     api::install(&lua, &state, cfg, request).map_err(|e| RenderError::Lua(e.to_string()))?;
 
-    let exec_result = lua
-        .load(template.lua_source.as_str())
-        .set_name(template.chunk_name.clone())
-        .exec();
+    let exec_result = cfg
+        .cache
+        .chunk(&lua, &template)
+        .and_then(|chunk| chunk.call::<()>(()));
 
     // The flag catches timeouts even when a script pcall swallowed the signal.
     if state.timed_out.get() {

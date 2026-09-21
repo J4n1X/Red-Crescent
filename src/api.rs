@@ -7,6 +7,7 @@
 //! `_out_expr`, `print`), `include()`, `exit()`/`redirect()`, and the
 //! `request`/`response` tables.
 
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use crate::process_api;
 use crate::runtime::{
     ExitSignal, LuaCookie, RenderConfig, RenderState, RequestBody, RequestData, SendFileSpec,
 };
+use crate::template::TemplateCache;
 use crate::{crypto_api, sqlite_api};
 
 const MAX_INCLUDE_DEPTH: u32 = 16;
@@ -214,9 +216,64 @@ pub(crate) fn install_core(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
         package.set("path", format!("{dir}/?.lua;{dir}/?/init.lua"))?;
         // Empty unless C-module directories were configured.
         package.set("cpath", cfg.c_module_path.as_deref().unwrap_or(""))?;
+
+        // Swap the stock Lua searcher for one that goes through the shared
+        // chunk cache. `package.loaded` starts empty in every state, so the
+        // stock one re-opens, re-reads and re-parses each module on every
+        // request. The C searcher beside it is left alone.
+        if let Ok(searchers) = package.get::<Table>("searchers") {
+            let serve_dir = cfg.serve_dir.clone();
+            let cache = Arc::clone(&cfg.cache);
+            searchers.set(
+                2,
+                lua.create_function(move |lua, name: String| {
+                    search_lua_module(lua, &cache, &serve_dir, &name)
+                })?,
+            )?;
+        }
     }
 
     Ok(())
+}
+
+/// `package.searchers[2]`, replacing the stock Lua loader.
+///
+/// Keeps the stock contract: the same `?.lua` then `?/init.lua` order, dots in
+/// the module name becoming directory separators, a loader plus its filename on
+/// success, and a `no file '...'` line per path tried on failure, which
+/// `require` collects into its own "module not found" error. Resolution is
+/// canonicalized and checked against the serve directory, so a crafted name
+/// cannot reach outside it.
+fn search_lua_module(
+    lua: &Lua,
+    cache: &TemplateCache,
+    serve_dir: &Path,
+    name: &str,
+) -> mlua::Result<(Value, Value)> {
+    let rel = name.replace('.', std::path::MAIN_SEPARATOR_STR);
+    let mut tried: Vec<String> = Vec::new();
+
+    for candidate in [format!("{rel}.lua"), format!("{rel}/init.lua")] {
+        let joined = serve_dir.join(&candidate);
+        let resolved = joined
+            .canonicalize()
+            .ok()
+            .filter(|abs| abs.starts_with(serve_dir) && abs.is_file());
+        let Some(abs) = resolved else {
+            tried.push(format!("\n\tno file '{}'", joined.display()));
+            continue;
+        };
+
+        let module = cache
+            .load_module(&abs, &candidate)
+            .map_err(|e| mlua::Error::runtime(format!("require '{name}': {e}")))?;
+        let loader = cache.chunk(lua, &module)?;
+        let path = lua.create_string(abs.to_string_lossy().as_bytes())?;
+        return Ok((Value::Function(loader), Value::String(path)));
+    }
+
+    let message = lua.create_string(tried.concat())?;
+    Ok((Value::String(message), Value::Nil))
 }
 
 /// Full request-rendering API: everything from [`install_core`] plus output,
@@ -346,10 +403,7 @@ pub(crate) fn install(
                 .load(&abs, &display_name)
                 .map_err(|e| mlua::Error::runtime(format!("include: {e}")))?;
 
-            let func = lua
-                .load(template.lua_source.as_str())
-                .set_name(template.chunk_name.clone())
-                .into_function()?;
+            let func = cache.chunk(lua, &template)?;
 
             st.include_depth.set(st.include_depth.get() + 1);
             let result = func.call::<()>(());

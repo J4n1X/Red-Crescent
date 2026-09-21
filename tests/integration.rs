@@ -528,3 +528,138 @@ async fn template_edits_are_picked_up_when_cache_validates_mtime() {
     std::fs::remove_file(&path).ok();
     assert!(body.contains("version-two"), "stale cache: {body}");
 }
+
+/// The second request to a template runs cached bytecode rather than freshly
+/// parsed source. Both paths must produce the same bytes, for the page itself
+/// and for anything it includes.
+#[actix_web::test]
+async fn cached_templates_render_identically_on_every_request() {
+    let app = default_app().await;
+    for uri in ["/hello.lhtml?name=Janick", "/include_page.lhtml"] {
+        let mut seen: Option<String> = None;
+        for attempt in 1..=3 {
+            let resp =
+                test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri} attempt {attempt}");
+            let body = body_string(resp).await;
+            match &seen {
+                None => seen = Some(body),
+                Some(first) => assert_eq!(first, &body, "{uri} changed on attempt {attempt}"),
+            }
+        }
+    }
+}
+
+/// A template that raises must keep failing the same way once it is cached —
+/// the dump must not swallow the error or lose the 500.
+#[actix_web::test]
+async fn a_failing_template_stays_failing_when_cached() {
+    let app = default_app().await;
+    for attempt in 1..=2 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get().uri("/err.lhtml").to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "attempt {attempt}"
+        );
+    }
+}
+
+/// `require` resolves `?/init.lua` when `?.lua` does not exist, the same order
+/// `package.path` declares.
+#[actix_web::test]
+async fn require_falls_back_to_init_lua() {
+    let app = default_app().await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/require_init.lhtml")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_string(resp).await.contains("pkg-init"));
+}
+
+/// A missing module still names every path it looked at, so the error stays as
+/// useful as the stock searcher's.
+#[actix_web::test]
+async fn require_reports_the_paths_it_tried() {
+    let app = default_app().await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/require_missing.lhtml")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains("not found"), "{body}");
+    assert!(body.contains("nope/missing.lua"), "{body}");
+    assert!(body.contains("nope/missing/init.lua"), "{body}");
+}
+
+/// Modules are cached process-wide, so the second request loads bytecode rather
+/// than re-reading the file. It must behave exactly like the first.
+#[actix_web::test]
+async fn cached_modules_load_identically_on_every_request() {
+    let app = default_app().await;
+    let mut seen: Option<String> = None;
+    for attempt in 1..=3 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/require_page.lhtml")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "attempt {attempt}");
+        let body = body_string(resp).await;
+        assert!(body.contains("Hello, Bob!"), "attempt {attempt}: {body}");
+        match &seen {
+            None => seen = Some(body),
+            Some(first) => assert_eq!(first, &body, "changed on attempt {attempt}"),
+        }
+    }
+}
+
+/// A symlink inside the serve directory pointing out of it must not be loadable
+/// as a module. The stock searcher would follow it; this one canonicalizes and
+/// checks the result, the same rule `include()` applies.
+#[actix_web::test]
+async fn require_refuses_a_module_symlinked_out_of_the_serve_dir() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(
+        outside.path().join("escape.lua"),
+        "return { got = 'outside' }",
+    )
+    .unwrap();
+
+    let serve = tempfile::tempdir().unwrap();
+    std::fs::write(
+        serve.path().join("index.lhtml"),
+        "<?lua local ok = pcall(require, 'escape') ?><?lua= ok and 'LOADED' or 'refused' ?>",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("escape.lua"),
+        serve.path().join("escape.lua"),
+    )
+    .unwrap();
+
+    let app = app_with(common::test_config(serve.path().to_str().unwrap()))
+        .await
+        .0;
+    let resp = test::call_service(&app, test::TestRequest::get().uri("/").to_request()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("refused"),
+        "symlink escaped the serve dir: {body}"
+    );
+}
