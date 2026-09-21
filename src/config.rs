@@ -29,6 +29,11 @@ pub const DEFAULT_THREAD_MEMORY_LIMIT_MB: usize = 256;
 /// Warm SQLite connections parked per database, per worker thread.
 pub const DEFAULT_SQLITE_IDLE_CONNECTIONS: usize = 2;
 pub const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024;
+/// Bytes of page output a JIT backend accumulates in Lua before draining to
+/// the response buffer. Ignored on non-JIT backends, which write straight
+/// through. Peak extra Lua memory is roughly twice this, so it is worth
+/// subtracting from the effective memory limit when tuning either.
+pub const DEFAULT_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 256 * 1024 * 1024;
 pub const DEFAULT_MAX_UPLOAD_FILES: usize = 256;
 
@@ -86,6 +91,11 @@ pub struct Settings {
     /// Maximum request body size in bytes, non-multipart [default: 1048576]
     #[arg(long, env = "RC_MAX_BODY_SIZE")]
     pub max_body_size: Option<usize>,
+
+    /// Page output buffered in Lua before draining, in bytes; JIT backends
+    /// only [default: 65536]
+    #[arg(long, env = "RC_OUTPUT_BUFFER_BYTES")]
+    pub output_buffer_bytes: Option<usize>,
 
     /// Writable data directory: sandbox for sqlite databases, uploads and
     /// send_file; must not be inside the serve directory [default: ./data]
@@ -175,6 +185,7 @@ pub struct Config {
     pub timeout_ms: u64,
     pub memory_limit_mb: usize,
     pub max_body_size: usize,
+    pub output_buffer_bytes: usize,
     pub data_dir: PathBuf,
     pub max_upload_size: usize,
     pub max_upload_files: usize,
@@ -228,6 +239,11 @@ impl Config {
                 DEFAULT_MEMORY_LIMIT_MB,
             ),
             max_body_size: pick(cli.max_body_size, file.max_body_size, DEFAULT_MAX_BODY_SIZE),
+            output_buffer_bytes: pick(
+                cli.output_buffer_bytes,
+                file.output_buffer_bytes,
+                DEFAULT_OUTPUT_BUFFER_BYTES,
+            ),
             data_dir: pick(
                 cli.data_dir.clone(),
                 file.data_dir,

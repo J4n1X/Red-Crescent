@@ -47,9 +47,9 @@
 ?>
 <?lua include("partials/header.lhtml") ?>
 
-<?lua= util.flash_html() ?>
+<?lua== util.flash_html() ?>
 
-<h1><?lua= is_folder and "📁" or "📄" ?> <?lua= html_escape(item.name) ?></h1>
+<h1><?lua= is_folder and "📁" or "📄" ?> <?lua= item.name ?></h1>
 <p class="meta">
     <?lua if is_folder then ?>
         <a href="/?folder=<?lua= item.id ?>">open</a>
@@ -64,11 +64,11 @@
 <div class="panel">
     <h2>Rename</h2>
     <form class="rowform" method="post" action="/actions.lhtml">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="rename_<?lua= kind ?>">
         <input type="hidden" name="id" value="<?lua= item.id ?>">
         <input type="hidden" name="folder" value="<?lua= folder_param ?>">
-        <input type="text" name="name" value="<?lua= html_escape(item.name) ?>" aria-label="New name">
+        <input type="text" name="name" value="<?lua= item.name ?>" aria-label="New name">
         <button type="submit">Rename</button>
     </form>
 </div>
@@ -76,14 +76,14 @@
 <div class="panel">
     <h2>Move</h2>
     <form class="rowform" method="post" action="/actions.lhtml">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="move_<?lua= kind ?>">
         <input type="hidden" name="id" value="<?lua= item.id ?>">
         <input type="hidden" name="folder" value="<?lua= folder_param ?>">
         <select name="dest" aria-label="Destination folder">
             <option value="">/ (root)</option>
             <?lua for _, f in ipairs(destinations) do ?>
-                <option value="<?lua= f.id ?>"<?lua= f.id == parent_id and " selected" or "" ?>><?lua= html_escape(f.path) ?></option>
+                <option value="<?lua= f.id ?>"<?lua= f.id == parent_id and " selected" or "" ?>><?lua= f.path ?></option>
             <?lua end ?>
         </select>
         <button type="submit">Move</button>
@@ -94,7 +94,7 @@
     <h2>Delete</h2>
     <form class="rowform" method="post" action="/actions.lhtml"
           data-confirm="<?lua= is_folder and "Delete this folder and everything inside it?" or "Delete this file?" ?>">
-        <?lua= csrf_html ?>
+        <?lua== csrf_html ?>
         <input type="hidden" name="action" value="delete_<?lua= kind ?>">
         <input type="hidden" name="id" value="<?lua= item.id ?>">
         <input type="hidden" name="folder" value="<?lua= folder_param ?>">

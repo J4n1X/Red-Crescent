@@ -21,7 +21,7 @@
 <?lua include("partials/header.lhtml") ?>
 <div class="authbox">
     <h1>Not found</h1>
-    <p>There is nothing at <code><?lua= html_escape(request.path) ?></code>.</p>
+    <p>There is nothing at <code><?lua= request.path ?></code>.</p>
     <p><a href="/">Back to your files</a></p>
 </div>
 <?lua include("partials/footer.lhtml") ?>

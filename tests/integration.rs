@@ -663,3 +663,86 @@ async fn require_refuses_a_module_symlinked_out_of_the_serve_dir() {
         "symlink escaped the serve dir: {body}"
     );
 }
+
+/// `<?lua= ?>` escapes by default and `<?lua== ?>` does not. The explicit
+/// `html_escape()` still works for values assembled inside Lua.
+#[actix_web::test]
+async fn inline_expressions_escape_unless_the_raw_form_is_used() {
+    let app = default_app().await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/escaping.lhtml?v=%3Cb%3E%26%27%22")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("esc:[&lt;b&gt;&amp;&#x27;&quot;]"),
+        "default form must escape: {body}"
+    );
+    assert!(
+        body.contains(r#"raw:[<b>&'"]"#),
+        "raw form must not escape: {body}"
+    );
+    assert!(body.contains("num:[42]"), "numbers pass through: {body}");
+    assert!(body.contains("nil:[]"), "nil prints nothing: {body}");
+    // Escaping in Lua then emitting raw is the pattern for markup built by
+    // hand, and must escape exactly once.
+    assert!(
+        body.contains("lua:[&lt;b&gt;&amp;&#x27;&quot;]"),
+        "html_escape + raw form must escape once: {body}"
+    );
+    // And the migration hazard, pinned deliberately: the old
+    // `<?lua= html_escape(x) ?>` shape now escapes twice.
+    assert!(
+        body.contains("dbl:[&amp;lt;b&amp;gt;"),
+        "html_escape under the default form double-escapes: {body}"
+    );
+}
+
+/// A value needing no escaping must come back byte-identical, which is the
+/// short-circuit path that skips an allocation.
+#[actix_web::test]
+async fn values_needing_no_escaping_pass_through_untouched() {
+    let app = default_app().await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/escaping.lhtml?v=report.pdf")
+            .to_request(),
+    )
+    .await;
+    let body = body_string(resp).await;
+    for expected in ["esc:[report.pdf]", "raw:[report.pdf]", "lua:[report.pdf]"] {
+        assert!(body.contains(expected), "missing {expected}: {body}");
+    }
+}
+
+/// Output larger than the buffer threshold must come back whole and in order.
+/// On a JIT backend `_out` accumulates in Lua and drains periodically, so this
+/// is where a lost or misordered flush would show up; on a direct backend it
+/// simply passes through.
+#[actix_web::test]
+async fn large_interleaved_output_survives_buffering() {
+    let app = default_app().await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/big_output.lhtml")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+
+    let expected: String = (1..=400).map(|i| format!("L{i}|RP{i};\n")).collect();
+    assert!(
+        body.contains(expected.trim_end()),
+        "interleaved output not intact; got {} bytes starting {:?}",
+        body.len(),
+        &body[..body.len().min(80)]
+    );
+    assert!(body.trim_end().ends_with("END"), "tail lost: {:?}", &body[body.len().saturating_sub(40)..]);
+}

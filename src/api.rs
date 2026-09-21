@@ -7,6 +7,8 @@
 //! `_out_expr`, `print`), `include()`, `exit()`/`redirect()`, and the
 //! `request`/`response` tables.
 
+use std::cell::Cell;
+use std::os::raw::c_int;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -25,13 +27,163 @@ use crate::{crypto_api, sqlite_api};
 
 const MAX_INCLUDE_DEPTH: u32 = 16;
 
+thread_local! {
+    /// Output buffer of the request rendering on this thread, or null outside
+    /// a render. Only [`OutputScope`] ever sets it.
+    static CURRENT_OUT: Cell<*mut Vec<u8>> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// Points the thread-local at `state`'s buffer for as long as this lives, and
+/// restores the previous value on drop — including while unwinding, so neither
+/// a panic nor a Lua error can leave a dangling pointer behind.
+pub(crate) struct OutputScope(*mut Vec<u8>);
+
+impl OutputScope {
+    pub(crate) fn new(state: &RenderState) -> Self {
+        OutputScope(CURRENT_OUT.replace(state.out.as_ptr()))
+    }
+}
+
+impl Drop for OutputScope {
+    fn drop(&mut self) {
+        let _ = CURRENT_OUT.try_with(|c| c.set(self.0));
+    }
+}
+
+/// `_out`, as a bare `lua_CFunction` rather than an mlua callback: ~19ns a call
+/// against ~105ns, and generated chunks call it once per literal HTML segment,
+/// thousands of times on a large page.
+///
+/// # Safety
+/// Registered only via `create_c_function`, so Lua guarantees a valid state and
+/// at least one argument slot. It must never panic, because unwinding across
+/// the C boundary is UB, so it does nothing that can: no borrow that could
+/// conflict, no fallible conversion, and no Lua error raised. Appending can
+/// abort on allocation failure, which is a clean abort rather than an unwind.
+///
+/// Aliasing: the pointer is only ever dereferenced from inside a Lua call, and
+/// no safe path holds a `borrow_mut` of the buffer across anything that can
+/// re-enter Lua, so the two never overlap.
+unsafe extern "C-unwind" fn lua_out(state: *mut mlua::lua_State) -> c_int {
+    let Ok(out) = CURRENT_OUT.try_with(|c| c.get()) else {
+        return 0;
+    };
+    if out.is_null() {
+        return 0;
+    }
+    let mut len: usize = 0;
+    let ptr = unsafe { mlua::ffi::lua_tolstring(state, 1, &mut len) };
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+        (*out).extend_from_slice(bytes);
+    }
+    0
+}
+
+
+/// Where the output functions other than `_out` write.
+///
+/// On a non-JIT backend they append straight to the request buffer. On a JIT
+/// backend `_out` is a Lua closure accumulating into a Lua table, so everything
+/// else has to go through that same closure or output would interleave out of
+/// order. One type keeps the two paths from drifting.
+#[derive(Clone)]
+pub(crate) enum Emitter {
+    Direct(Rc<RenderState>),
+    #[cfg(feature = "luajit")]
+    Buffered(mlua::Function),
+}
+
+impl Emitter {
+    fn emit(&self, _lua: &Lua, bytes: &[u8]) -> mlua::Result<()> {
+        match self {
+            Emitter::Direct(st) => {
+                st.out.borrow_mut().extend_from_slice(bytes);
+                Ok(())
+            }
+            #[cfg(feature = "luajit")]
+            Emitter::Buffered(out) => out.call::<()>(_lua.create_string(bytes)?),
+        }
+    }
+}
+
+/// Registry key holding the JIT backend's buffer flush, out of reach of
+/// template code.
+#[cfg(feature = "luajit")]
+pub(crate) const OUT_FLUSH_KEY: &str = "rc_out_flush";
+
+/// `_out` on a JIT backend: a Lua closure appending to a table and draining to
+/// the raw sink once it passes `limit` bytes. LuaJIT inlines it into the trace,
+/// which beats even a ~20ns C call; on a non-JIT backend the reverse is true,
+/// which is why the two differ. Returns the closure and its flush.
+#[cfg(feature = "luajit")]
+const BUFFERED_OUT: &str = r#"
+local sink, limit = ...
+local concat = table.concat
+local b, n, sz = {}, 0, 0
+-- Bounded by pieces as well as bytes: a flood of one-byte writes would
+-- otherwise hold one table slot each long before the byte limit is reached.
+local max_pieces = 8192
+local function out(s)
+    n = n + 1
+    b[n] = s
+    sz = sz + #s
+    if sz >= limit or n >= max_pieces then
+        sink(concat(b, "", 1, n))
+        n, sz = 0, 0
+    end
+end
+local function flush()
+    if n > 0 then
+        sink(concat(b, "", 1, n))
+        n, sz = 0, 0
+    end
+end
+return out, flush
+"#;
+
+/// Install `_out` and hand back the emitter the other output functions use.
+/// The JIT variant also leaves `_out_flush` in globals for `render` to call.
+fn install_out(lua: &Lua, state: &Rc<RenderState>, _cfg: &RenderConfig) -> mlua::Result<Emitter> {
+    // SAFETY: see `lua_out`. Its buffer comes from the thread-local that
+    // `OutputScope` in `render` keeps pointed at this request's state.
+    let sink = unsafe { lua.create_c_function(lua_out)? };
+
+    #[cfg(not(feature = "luajit"))]
+    {
+        lua.globals().set("_out", sink)?;
+        Ok(Emitter::Direct(Rc::clone(state)))
+    }
+
+    #[cfg(feature = "luajit")]
+    {
+        let _ = state;
+        let setup = lua.load(BUFFERED_OUT).into_function()?;
+        let (out, flush): (mlua::Function, mlua::Function) =
+            setup.call((sink, _cfg.output_buffer_bytes))?;
+        lua.globals().set("_out", out.clone())?;
+        // Registry, not globals: a template that assigned over `_out_flush`
+        // would silently lose whatever was still buffered.
+        lua.set_named_registry_value(OUT_FLUSH_KEY, flush)?;
+        Ok(Emitter::Buffered(out))
+    }
+}
+
 /// Request-independent API, shared by page rendering and background jobs.
 pub(crate) fn install_core(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
     let globals = lua.globals();
 
     globals.set(
         "html_escape",
-        lua.create_function(|_, input: String| Ok(html_escape(&input)))?,
+        lua.create_function(|lua, input: mlua::String| {
+            if !needs_escaping(&input.as_bytes()) {
+                return Ok(input);
+            }
+            lua.create_string(escape_bytes(&input.as_bytes()))
+        })?,
     )?;
 
     // --- server info ----------------------------------------------------
@@ -293,44 +445,64 @@ pub(crate) fn install(
     // output survives untouched.
 
     // _out: internal, used by generated chunks for literal HTML segments.
-    let st = Rc::clone(state);
-    globals.set(
-        "_out",
-        lua.create_function(move |_, text: mlua::String| {
-            st.out.borrow_mut().extend_from_slice(&text.as_bytes());
-            Ok(())
-        })?,
-    )?;
+    // Backend-dependent; everything below writes through the emitter it hands
+    // back so that ordering holds on both.
+    let emitter = install_out(lua, state, cfg)?;
 
-    // _out_expr: internal, used for <?lua= expr ?>. nil prints nothing.
-    let st = Rc::clone(state);
+    // _out_expr: internal, used for <?lua= expr ?>. Escapes by default; nil
+    // prints nothing. Values are rendered to bytes *before* the buffer is
+    // touched, so a __tostring or __pairs metamethod that writes output cannot
+    // re-enter a live borrow.
+    let em = emitter.clone();
     globals.set(
         "_out_expr",
         lua.create_function(move |lua, values: MultiValue| {
-            let mut out = st.out.borrow_mut();
             for value in values {
                 if let Value::Nil = value {
                     continue;
                 }
-                append_value(lua, value, &mut out)?;
+                let bytes = value_to_bytes(lua, value)?;
+                if needs_escaping(&bytes) {
+                    em.emit(lua, &escape_bytes(&bytes))?;
+                } else {
+                    em.emit(lua, &bytes)?;
+                }
             }
             Ok(())
         })?,
     )?;
 
-    // print: writes to the page, joining arguments with a space.
-    let st = Rc::clone(state);
+    // _out_raw: internal, used for <?lua== expr ?>. Writes the value through
+    // unescaped, for templates deliberately emitting markup.
+    let em = emitter.clone();
+    globals.set(
+        "_out_raw",
+        lua.create_function(move |lua, values: MultiValue| {
+            for value in values {
+                if let Value::Nil = value {
+                    continue;
+                }
+                let bytes = value_to_bytes(lua, value)?;
+                em.emit(lua, &bytes)?;
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // print: writes to the page, joining arguments with a space. Unescaped:
+    // it is how a template emits markup it assembled itself.
+    let em = emitter.clone();
     globals.set(
         "print",
         lua.create_function(move |lua, params: MultiValue| {
-            let mut out = st.out.borrow_mut();
             let mut first = true;
             for value in params {
+                let bytes = value_to_bytes(lua, value)?;
                 if !first {
-                    out.push(b' ');
+                    em.emit(lua, b" ")?;
                 }
                 first = false;
-                append_value(lua, value, &mut out)?;
+                em.emit(lua, &bytes)?;
             }
             Ok(())
         })?,
@@ -641,29 +813,47 @@ fn build_request_table(lua: &Lua, request: &RequestData) -> mlua::Result<Table> 
     Ok(table)
 }
 
-pub fn html_escape(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for c in input.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            c => out.push(c),
+/// Bytes needing replacement. Lua strings are byte strings, and every escaped
+/// character is ASCII, so this works bytewise without decoding UTF-8.
+#[inline]
+fn needs_escaping(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .any(|b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\''))
+}
+
+fn escape_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + 16);
+    for &b in bytes {
+        match b {
+            b'&' => out.extend_from_slice(b"&amp;"),
+            b'<' => out.extend_from_slice(b"&lt;"),
+            b'>' => out.extend_from_slice(b"&gt;"),
+            b'"' => out.extend_from_slice(b"&quot;"),
+            b'\'' => out.extend_from_slice(b"&#x27;"),
+            b => out.push(b),
         }
     }
     out
 }
 
+pub fn html_escape(input: &str) -> String {
+    if !needs_escaping(input.as_bytes()) {
+        return input.to_string();
+    }
+    // escape_bytes only ever replaces ASCII with ASCII, so UTF-8 is preserved.
+    String::from_utf8(escape_bytes(input.as_bytes())).expect("escaping preserves UTF-8")
+}
+
 /// Append a value to the output buffer: strings pass through as raw bytes,
 /// everything else is stringified like `value_to_string`.
-fn append_value(lua: &Lua, value: Value, out: &mut Vec<u8>) -> mlua::Result<()> {
-    match value {
-        Value::String(s) => out.extend_from_slice(&s.as_bytes()),
-        other => out.extend_from_slice(value_to_string(lua, other)?.as_bytes()),
-    }
-    Ok(())
+/// Render a value to output bytes. Lua strings pass through as raw bytes so
+/// binary output survives; everything else goes via `value_to_string`.
+fn value_to_bytes(lua: &Lua, value: Value) -> mlua::Result<Vec<u8>> {
+    Ok(match value {
+        Value::String(s) => s.as_bytes().to_vec(),
+        other => value_to_string(lua, other)?.into_bytes(),
+    })
 }
 
 /// Stringify print/log arguments, joined with a single space.

@@ -20,9 +20,9 @@
 <?lua include("partials/header.lhtml") ?>
 <div class="authbox">
     <h1>Log in</h1>
-    <?lua= util.flash_html() ?>
+    <?lua== util.flash_html() ?>
     <?lua if error_message then ?>
-        <div class="flash flash-err"><?lua= html_escape(error_message) ?></div>
+        <div class="flash flash-err"><?lua= error_message ?></div>
     <?lua end ?>
     <form method="post" action="/login.lhtml">
         <label for="username">Username</label>

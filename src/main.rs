@@ -90,6 +90,7 @@ async fn main() -> std::io::Result<()> {
             memory_bytes: config.memory_limit_mb * 1024 * 1024,
         },
         max_body_size: config.max_body_size,
+        output_buffer_bytes: config.output_buffer_bytes,
         max_upload_size: config.max_upload_size,
         max_upload_files: config.max_upload_files,
         threads: Arc::new(ThreadRegistry::new()),

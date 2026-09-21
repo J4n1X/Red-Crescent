@@ -21,6 +21,8 @@ pub enum Segment {
     Html { text: String, line: u32 },
     /// A `<?lua ... ?>` code block, inlined verbatim into the chunk.
     Code { code: String, line: u32 },
+    /// A `<?lua== ... ?>` expression, written out **without** escaping.
+    RawExpr { code: String, line: u32 },
     /// A `<?lua= expr ?>` expression block, emitted through `_out_expr`.
     Expr { code: String, line: u32 },
 }
@@ -30,6 +32,7 @@ impl Segment {
         match self {
             Segment::Html { line, .. }
             | Segment::Code { line, .. }
+            | Segment::RawExpr { line, .. }
             | Segment::Expr { line, .. } => *line,
         }
     }
@@ -55,6 +58,13 @@ impl fmt::Display for TemplateError {
 impl std::error::Error for TemplateError {}
 
 /// Split a template into HTML and Lua segments.
+#[derive(Clone, Copy)]
+enum BlockKind {
+    Code,
+    Expr,
+    RawExpr,
+}
+
 pub fn parse(src: &str) -> Result<Vec<Segment>, TemplateError> {
     let bytes = src.as_bytes();
     let mut segments = Vec::new();
@@ -71,12 +81,18 @@ pub fn parse(src: &str) -> Result<Vec<Segment>, TemplateError> {
         }
         if bytes[i] == b'<' && src[i..].starts_with("<?lua") {
             let after = i + "<?lua".len();
-            // Only "<?lua=", "<?lua" + whitespace, or "<?lua?>" open a block;
-            // anything else (e.g. "<?luax") is plain HTML.
-            let (is_expr, code_start) = match bytes.get(after) {
-                Some(b'=') => (true, after + 1),
-                Some(c) if c.is_ascii_whitespace() => (false, after),
-                Some(b'?') => (false, after),
+            // Only "<?lua=", "<?lua==", "<?lua" + whitespace, or "<?lua?>" open
+            // a block; anything else (e.g. "<?luax") is plain HTML.
+            //
+            // "<?lua==" is safe to claim as the raw form: it used to compile
+            // the source "= expr", which is always a Lua syntax error.
+            let (kind, code_start) = match bytes.get(after) {
+                Some(b'=') => match bytes.get(after + 1) {
+                    Some(b'=') => (BlockKind::RawExpr, after + 2),
+                    _ => (BlockKind::Expr, after + 1),
+                },
+                Some(c) if c.is_ascii_whitespace() => (BlockKind::Code, after),
+                Some(b'?') => (BlockKind::Code, after),
                 _ => {
                     i += 1;
                     continue;
@@ -100,16 +116,19 @@ pub fn parse(src: &str) -> Result<Vec<Segment>, TemplateError> {
                 })?;
 
             let code = src[code_start..code_start + code_len].to_string();
-            segments.push(if is_expr {
-                Segment::Expr {
+            segments.push(match kind {
+                BlockKind::Expr => Segment::Expr {
                     code,
                     line: open_line,
-                }
-            } else {
-                Segment::Code {
+                },
+                BlockKind::RawExpr => Segment::RawExpr {
                     code,
                     line: open_line,
-                }
+                },
+                BlockKind::Code => Segment::Code {
+                    code,
+                    line: open_line,
+                },
             });
 
             line += newlines;
@@ -245,6 +264,12 @@ pub fn generate(segments: &[Segment]) -> String {
                 out.push_str("_out(\"");
                 escape_lua_string_into(&mut out, text);
                 out.push_str("\"); ");
+            }
+            Segment::RawExpr { code, .. } => {
+                out.push_str("_out_raw(");
+                out.push_str(code);
+                out.push_str("); ");
+                cur_line += count_newlines(code);
             }
             Segment::Expr { code, .. } => {
                 out.push_str("_out_expr(");
@@ -434,6 +459,12 @@ mod tests {
             line,
         }
     }
+    fn raw_expr(code_: &str, line: u32) -> Segment {
+        Segment::RawExpr {
+            code: code_.to_string(),
+            line,
+        }
+    }
 
     /// A state with the output hooks a generated chunk calls, and nothing else.
     fn stub_lua() -> Lua {
@@ -552,6 +583,28 @@ mod tests {
             second.bytecode.get().is_none(),
             "stale bytecode carried over"
         );
+    }
+
+    #[test]
+    fn double_equals_is_the_raw_expression_form() {
+        assert_eq!(parse("<?lua== x ?>").unwrap(), vec![raw_expr(" x ", 1)]);
+        assert_eq!(parse("<?lua= x ?>").unwrap(), vec![expr(" x ", 1)]);
+    }
+
+    /// `<?lua raw = 1 ?>` is an ordinary code block assigning a global, and
+    /// must stay one. This is why the raw form is `==` and not `raw=`.
+    #[test]
+    fn a_global_named_raw_is_still_a_code_block() {
+        assert_eq!(
+            parse("<?lua raw = 1 ?>").unwrap(),
+            vec![code(" raw = 1 ", 1)]
+        );
+    }
+
+    #[test]
+    fn raw_expressions_keep_their_source_line() {
+        let segs = parse("a\nb\n<?lua== x ?>").unwrap();
+        assert_eq!(segs.last().unwrap(), &raw_expr(" x ", 3));
     }
 
     #[test]

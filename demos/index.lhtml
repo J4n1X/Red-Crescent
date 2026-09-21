@@ -23,7 +23,7 @@
 <body>
     <?lua include("partials/nav.lhtml") ?>
     <main>
-        <h1>Welcome to Red Crescent<?lua= request.query.name and (", " .. html_escape(request.query.name)) or "" ?>!</h1>
+        <h1>Welcome to Red Crescent<?lua= request.query.name and (", " .. request.query.name) or "" ?>!</h1>
         <p>A PHP-like web server rendering <code>.lhtml</code> templates with Lua. This page uses
         <code>include()</code> for the nav bar, <code>require()</code> for a shared Lua module,
         and inline <code>&lt;?lua= ... ?&gt;</code> expressions.</p>

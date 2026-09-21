@@ -52,7 +52,7 @@
 ?>
 <?lua include("partials/header.lhtml") ?>
 <div class="authbox">
-    <h1>📄 <?lua= html_escape(share.file.name) ?></h1>
+    <h1>📄 <?lua= share.file.name ?></h1>
     <p class="meta">
         <?lua= util.human_size(share.file.size) ?> · shared <?lua= util.format_time(share.created_at) ?>
         · <?lua= share.downloads ?> download<?lua= share.downloads == 1 and "" or "s" ?>
@@ -131,9 +131,9 @@
 ?>
 <?lua include("partials/header.lhtml") ?>
 
-<?lua= util.flash_html() ?>
+<?lua== util.flash_html() ?>
 
-<h1>📁 <?lua= html_escape(root.name) ?></h1>
+<h1>📁 <?lua= root.name ?></h1>
 <p class="meta">
     Shared folder · <?lua= util.format_time(share.created_at) ?>
     · <?lua= share.downloads ?> download<?lua= share.downloads == 1 and "" or "s" ?>
@@ -143,7 +143,7 @@
 <div class="crumbs">
     <?lua for i, crumb in ipairs(crumbs) do ?>
         <?lua if i > 1 then ?><span class="sep">/</span><?lua end ?>
-        <a href="<?lua= share_url ?>?f=<?lua= crumb.id ?>"><?lua= html_escape(crumb.name) ?></a>
+        <a href="<?lua= share_url ?>?f=<?lua= crumb.id ?>"><?lua= crumb.name ?></a>
     <?lua end ?>
     <?lua if archiver then ?>
         <span class="sep">·</span>
@@ -155,14 +155,14 @@
     <tr><th>Name</th><th>Size</th><th>Added</th></tr>
     <?lua for _, sub in ipairs(subfolders) do ?>
         <tr>
-            <td>📁 <a href="<?lua= share_url ?>?f=<?lua= sub.id ?>"><?lua= html_escape(sub.name) ?></a></td>
+            <td>📁 <a href="<?lua= share_url ?>?f=<?lua= sub.id ?>"><?lua= sub.name ?></a></td>
             <td class="meta">—</td>
             <td class="meta"><?lua= util.format_time(sub.created_at) ?></td>
         </tr>
     <?lua end ?>
     <?lua for _, file in ipairs(files) do ?>
         <tr>
-            <td>📄 <a href="<?lua= share_url ?>?dl=<?lua= file.id ?>"><?lua= html_escape(file.name) ?></a></td>
+            <td>📄 <a href="<?lua= share_url ?>?dl=<?lua= file.id ?>"><?lua= file.name ?></a></td>
             <td class="meta"><?lua= util.human_size(file.size) ?></td>
             <td class="meta"><?lua= util.format_time(file.created_at) ?></td>
         </tr>
