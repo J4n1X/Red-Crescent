@@ -22,6 +22,7 @@ pub fn register(lua: &Lua, data_dir: &Path, idle_limit: usize) -> mlua::Result<(
         lua.create_function(move |_, relpath: String| {
             let path = resolve_db_path(&dir, &relpath)?;
             let conn = checkout(&path).map_err(mlua::Error::external)?;
+            crate::api::mark_finalizers();
             Ok(LuaConnection {
                 conn: Some(conn),
                 path,
