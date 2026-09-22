@@ -272,12 +272,13 @@ fn build_state(cfg: &RenderConfig) -> Result<(Lua, usize), RenderError> {
 pub fn render(
     cfg: &RenderConfig,
     template_abs: &Path,
+    template_meta: Option<&std::fs::Metadata>,
     display_name: &str,
     request: &RequestData,
 ) -> Result<RenderedResponse, RenderError> {
     let template = cfg
         .cache
-        .load(template_abs, display_name)
+        .load(template_abs, template_meta, display_name)
         .map_err(|e| template_error_to_render_error(e, display_name))?;
 
     // A native module can reach past the request environment, so it cannot
@@ -536,7 +537,7 @@ mod tests {
     }
 
     fn body(cfg: &RenderConfig, page: &Path) -> String {
-        let rendered = render(cfg, page, "p.lhtml", &request()).expect("render failed");
+        let rendered = render(cfg, page, None, "p.lhtml", &request()).expect("render failed");
         String::from_utf8(rendered.body).unwrap()
     }
 
@@ -744,7 +745,7 @@ setmetatable({}, mt)
         let mut cfg = config(dir.path());
         cfg.limits.memory_bytes = 4 * 1024 * 1024;
 
-        let Err(err) = render(&cfg, &page, "p.lhtml", &request()) else {
+        let Err(err) = render(&cfg, &page, None, "p.lhtml", &request()) else {
             panic!("the memory limit was not hit");
         };
         assert!(matches!(err, RenderError::Memory), "got {err:?}");

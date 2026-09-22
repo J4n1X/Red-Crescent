@@ -21,6 +21,7 @@ use mlua::{Lua, LuaSerdeExt, MultiValue, Table, Value};
 
 use crate::fs_api;
 use crate::process_api;
+use crate::resolve::{Resolved, resolve};
 use crate::runtime::{
     ExitSignal, LuaCookie, RenderConfig, RenderState, RequestBody, RequestData, SendFileSpec,
 };
@@ -483,25 +484,24 @@ enum Found {
 }
 
 /// Resolve a module name like the stock searcher: `?.lua` then `?/init.lua`,
-/// dots becoming separators. Canonicalized and checked against the serve
-/// directory, so a crafted name cannot reach outside it.
+/// dots becoming separators. Resolved like a request path, so a crafted name
+/// cannot reach outside the serve directory.
 fn find_module(cache: &TemplateCache, serve_dir: &Path, name: &str) -> mlua::Result<Found> {
     let rel = name.replace('.', std::path::MAIN_SEPARATOR_STR);
     let mut tried = String::new();
 
     for candidate in [format!("{rel}.lua"), format!("{rel}/init.lua")] {
-        let joined = serve_dir.join(&candidate);
-        let resolved = joined
-            .canonicalize()
-            .ok()
-            .filter(|abs| abs.starts_with(serve_dir) && abs.is_file());
-        let Some(abs) = resolved else {
-            tried.push_str(&format!("\n\tno file '{}'", joined.display()));
-            continue;
+        let (abs, meta) = match resolve(serve_dir, &candidate, None, |_| false) {
+            Resolved::Found(f) if f.meta.is_some() || f.path.is_file() => (f.path, f.meta),
+            _ => {
+                let joined = serve_dir.join(&candidate);
+                tried.push_str(&format!("\n\tno file '{}'", joined.display()));
+                continue;
+            }
         };
 
         let module = cache
-            .load_module(&abs, &candidate)
+            .load_module(&abs, meta.as_ref(), &candidate)
             .map_err(|e| mlua::Error::runtime(format!("require '{name}': {e}")))?;
         return Ok(Found::Chunk(module, abs));
     }
@@ -958,15 +958,20 @@ pub(crate) fn install_request_api(lua: &Lua, cfg: &RenderConfig) -> mlua::Result
                         "include: depth limit ({MAX_INCLUDE_DEPTH}) exceeded — recursive include?"
                     )));
                 }
-                let joined = serve_dir.join(rel.trim_start_matches('/'));
-                let abs = joined
-                    .canonicalize()
-                    .map_err(|_| mlua::Error::runtime(format!("include: file not found: {rel}")))?;
-                if !abs.starts_with(&serve_dir) {
-                    return Err(mlua::Error::runtime(format!(
-                        "include: path escapes the serve directory: {rel}"
-                    )));
-                }
+                let rel_path = rel.trim_start_matches('/');
+                let (abs, meta) = match resolve(&serve_dir, rel_path, None, |_| false) {
+                    Resolved::Found(found) => (found.path, found.meta),
+                    Resolved::Missing => {
+                        return Err(mlua::Error::runtime(format!(
+                            "include: file not found: {rel}"
+                        )));
+                    }
+                    Resolved::Escaped(_) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "include: path escapes the serve directory: {rel}"
+                        )));
+                    }
+                };
                 if !abs
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("lhtml"))
@@ -981,7 +986,7 @@ pub(crate) fn install_request_api(lua: &Lua, cfg: &RenderConfig) -> mlua::Result
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|_| rel.clone());
                 let template = cache
-                    .load(&abs, &display_name)
+                    .load(&abs, meta.as_ref(), &display_name)
                     .map_err(|e| mlua::Error::runtime(format!("include: {e}")))?;
 
                 let func = cache.chunk_for(lua, &template, &env)?;

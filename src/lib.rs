@@ -3,6 +3,7 @@ pub mod config;
 pub mod crypto_api;
 pub mod fs_api;
 pub mod process_api;
+pub mod resolve;
 pub mod runtime;
 pub mod sqlite_api;
 pub mod template;

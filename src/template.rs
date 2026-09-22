@@ -11,6 +11,7 @@
 use mlua::{Function, Lua, Table};
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::SystemTime;
@@ -427,13 +428,15 @@ impl TemplateCache {
     }
 
     /// Load (or fetch from cache) the template at `abs`, compiled to a Lua
-    /// chunk. `display_name` is the serve-dir-relative path used in errors.
+    /// chunk. `meta` is the file's, if the caller already has it — saves a
+    /// stat. `display_name` is the serve-dir-relative path used in errors.
     pub fn load(
         &self,
         abs: &Path,
+        meta: Option<&Metadata>,
         display_name: &str,
     ) -> Result<Arc<CompiledChunk>, TemplateError> {
-        self.get_or_compile(abs, display_name, |text| Ok(generate(&parse(text)?)))
+        self.get_or_compile(abs, meta, display_name, |text| Ok(generate(&parse(text)?)))
     }
 
     /// Load (or fetch from cache) the `.lua` module at `abs`. A module is
@@ -443,18 +446,27 @@ impl TemplateCache {
     pub(crate) fn load_module(
         &self,
         abs: &Path,
+        meta: Option<&Metadata>,
         display_name: &str,
     ) -> Result<Arc<CompiledChunk>, TemplateError> {
-        self.get_or_compile(abs, display_name, |text| Ok(text.to_string()))
+        self.get_or_compile(abs, meta, display_name, |text| Ok(text.to_string()))
     }
 
     fn get_or_compile(
         &self,
         abs: &Path,
+        meta: Option<&Metadata>,
         display_name: &str,
         to_lua: impl FnOnce(&str) -> Result<String, TemplateError>,
     ) -> Result<Arc<CompiledChunk>, TemplateError> {
-        let meta = std::fs::metadata(abs).map_err(io_to_template_error)?;
+        let stat;
+        let meta = match meta {
+            Some(meta) => meta,
+            None => {
+                stat = std::fs::metadata(abs).map_err(io_to_template_error)?;
+                &stat
+            }
+        };
         let mtime = meta.modified().ok();
         let len = meta.len();
 
@@ -550,7 +562,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_template(dir.path(), "p.lhtml", "<?lua= 6 * 7 ?>");
         let cache = TemplateCache::new(true);
-        let template = cache.load(&path, "p.lhtml").unwrap();
+        let template = cache.load(&path, None, "p.lhtml").unwrap();
         assert!(template.bytecode.get().is_none(), "nothing dumped yet");
 
         // First state compiles from source and leaves the dump behind.
@@ -588,7 +600,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_template(dir.path(), "m.lua", "return 7");
         let cache = TemplateCache::new(true);
-        let module = cache.load_module(&path, "m.lua").unwrap();
+        let module = cache.load_module(&path, None, "m.lua").unwrap();
         // A module is Lua already, so the source passes through unrewritten.
         assert_eq!(module.lua_source, "return 7");
         assert!(module.bytecode.get().is_none());
@@ -618,7 +630,7 @@ mod tests {
         let path = write_template(dir.path(), "e.lhtml", "a\nb\n<?lua error('boom') ?>");
         for enabled in [false, true] {
             let cache = TemplateCache::new(enabled);
-            let template = cache.load(&path, "e.lhtml").unwrap();
+            let template = cache.load(&path, None, "e.lhtml").unwrap();
             let lua = stub_lua();
             let err = cache
                 .chunk(&lua, &template, None)
@@ -640,14 +652,14 @@ mod tests {
         let path = write_template(dir.path(), "c.lhtml", "one");
         let cache = TemplateCache::new(true);
         let lua = stub_lua();
-        let first = cache.load(&path, "c.lhtml").unwrap();
+        let first = cache.load(&path, None, "c.lhtml").unwrap();
         cache.chunk(&lua, &first, None).unwrap();
         assert!(first.bytecode.get().is_some());
 
         // Same length, later mtime: the entry must be rebuilt, not reused.
         std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::write(&path, "two").unwrap();
-        let second = cache.load(&path, "c.lhtml").unwrap();
+        let second = cache.load(&path, None, "c.lhtml").unwrap();
         assert!(second.lua_source.contains("two"));
         assert!(
             second.bytecode.get().is_none(),
