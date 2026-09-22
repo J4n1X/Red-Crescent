@@ -1,9 +1,8 @@
 //! The HTTP layer: one catch-all handler that resolves the request path
 //! safely inside the serve directory, then either renders a `.lhtml` template
 //! -- on a blocking thread, or on the worker once it has proven fast -- or
-//! serves a static file. Multipart uploads are
-//! streamed to the spool directory before rendering; leftovers are deleted
-//! after the request.
+//! serves a static file. Multipart uploads are streamed to the spool
+//! directory before rendering; leftovers are deleted after the request.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -176,13 +175,13 @@ pub async fn handler(
     let outcome = if !budget.is_zero() && runs_inline(&abs) {
         let cfg = &data.render_cfg;
         std::panic::catch_unwind(AssertUnwindSafe(|| {
-            timed_render(cfg, &abs, &display_name, &request_data)
+            timed_render(cfg, &abs, &display_name, &request_data, budget)
         }))
         .map_err(|_| "render panicked".to_string())
     } else {
         let render_cfg = Arc::clone(&data.render_cfg);
         let path = abs.clone();
-        web::block(move || timed_render(&render_cfg, &path, &display_name, &request_data))
+        web::block(move || timed_render(&render_cfg, &path, &display_name, &request_data, budget))
             .await
             .map_err(|e| e.to_string())
     };
@@ -236,15 +235,21 @@ fn timed_render(
     abs: &Path,
     display_name: &str,
     request: &RequestData,
+    budget: Duration,
 ) -> Timed {
     crate::api::take_blocking();
     let started = Instant::now();
-    let usage = ThreadUsage::now();
+    let usage = (!budget.is_zero()).then(ThreadUsage::now);
     let result = render(cfg, abs, display_name, request);
     let wall = started.elapsed();
+    // Within budget by the wall clock is within it by any measure.
+    let cost = match usage {
+        Some(usage) if wall > budget => usage.cost_since(wall),
+        _ => wall,
+    };
     Timed {
         result,
-        cost: usage.cost_since(wall),
+        cost,
         blocked: crate::api::take_blocking(),
     }
 }

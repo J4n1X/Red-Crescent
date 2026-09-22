@@ -669,7 +669,7 @@ local function reset()
     end
 end
 
-local function build()
+local function build(request)
     local env
     local preload, loading = {}, {}
     local loaded = { --[[LOADED]] _G = nil }
@@ -677,6 +677,7 @@ local function build()
         --[[ENV]]
         _G = nil,
         _VERSION = VERSION,
+        request = request,
         -- `loaded` is this request's, so module state dies with it. `searchers`
         -- is absent rather than copied: require below does not consult it.
         package = {
@@ -1104,6 +1105,8 @@ pub(crate) fn install_request_api(lua: &Lua, cfg: &RenderConfig) -> mlua::Result
         lua.create_c_function(lua_mark_finalizers)?
     })?;
 
+    install_request_table(lua)?;
+
     let (builder, reset): (mlua::Function, mlua::Function) =
         env_builder_factory(lua)?.call(shared)?;
     lua.set_named_registry_value(ENV_BUILDER_KEY, builder)?;
@@ -1135,9 +1138,7 @@ fn env_builder_factory(lua: &Lua) -> mlua::Result<mlua::Function> {
 /// still points at the untouched original.
 pub(crate) fn build_request_env(lua: &Lua, request: &RequestData) -> mlua::Result<Table> {
     let builder: mlua::Function = lua.named_registry_value(ENV_BUILDER_KEY)?;
-    let env: Table = builder.call(())?;
-    env.set("request", build_request_table(lua, request)?)?;
-    Ok(env)
+    builder.call(build_request_table(lua, request)?)
 }
 
 /// Readies a pooled state's copies for the next request, replacing any this
@@ -1197,61 +1198,146 @@ pub(crate) unsafe extern "C-unwind" fn timeout_hook(
     }
 }
 
-fn build_request_table(lua: &Lua, request: &RequestData) -> mlua::Result<Table> {
-    let table = lua.create_table()?;
-    table.set("method", request.method.as_str())?;
-    table.set("path", request.path.as_str())?;
-    // nil rather than a placeholder string when there is no peer address, so
-    // `or` in Lua picks up a fallback the way it does for every other field.
-    table.set("remote_addr", request.remote_addr.as_deref())?;
+/// Registry keys for the native request-table builder and the metatable that
+/// makes `request.headers` case-insensitive, both made once per state.
+const REQUEST_TABLE_KEY: &str = "rc_request_table";
+const HEADERS_META: &std::ffi::CStr = c"rc_headers_meta";
 
-    // Query parameters: `query` maps each name to its last value (PHP-style);
-    // `query_all` maps each name to the array of all its values, in order.
-    let query_pairs: Vec<(String, String)> = serde_urlencoded::from_str(&request.query_string)
-        .unwrap_or_else(|e| {
-            log::warn!("failed to parse query string: {e}");
-            Vec::new()
-        });
-    let query = lua.create_table()?;
-    let query_all = lua.create_table()?;
-    for (name, value) in &query_pairs {
-        query.set(name.as_str(), value.as_str())?;
-        let values: Table = match query_all.get::<Option<Table>>(name.as_str())? {
-            Some(t) => t,
-            None => {
-                let t = lua.create_table()?;
-                query_all.set(name.as_str(), &t)?;
-                t
+/// What `lua_request_table` reads: borrowed, so nothing it touches has a
+/// destructor for a longjmp to skip.
+struct RequestFields<'a> {
+    request: &'a RequestData,
+    query: &'a [(String, String)],
+}
+
+thread_local! {
+    static PENDING_REQUEST: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
+}
+
+unsafe fn push_str(state: *mut mlua::lua_State, s: &str) {
+    unsafe { mlua::ffi::lua_pushlstring(state, s.as_ptr().cast(), s.len()) };
+}
+
+/// Pairs into a fresh table, last value winning.
+unsafe fn push_pairs(state: *mut mlua::lua_State, pairs: &[(String, String)]) {
+    use mlua::ffi;
+    unsafe {
+        ffi::lua_createtable(state, 0, pairs.len() as c_int);
+        for (name, value) in pairs {
+            push_str(state, name);
+            push_str(state, value);
+            ffi::lua_rawset(state, -3);
+        }
+    }
+}
+
+/// Builds `request` in one call; through mlua every field costs a protected
+/// call of its own. The body is left empty for `build_request_table` to fill.
+///
+/// # Safety
+/// Called only from `build_request_table`, which points `PENDING_REQUEST` at
+/// fields outliving the call. A memory error longjmps out of here, so this
+/// frame holds only borrows, and stays within LUA_MINSTACK slots.
+unsafe extern "C-unwind" fn lua_request_table(state: *mut mlua::lua_State) -> c_int {
+    use mlua::ffi;
+    let ptr = PENDING_REQUEST
+        .try_with(|p| p.get())
+        .unwrap_or(std::ptr::null());
+    if ptr.is_null() {
+        return 0;
+    }
+    let fields = unsafe { &*(ptr as *const RequestFields) };
+    let request = fields.request;
+    unsafe {
+        ffi::lua_createtable(state, 0, 10);
+        push_str(state, &request.method);
+        ffi::lua_setfield(state, -2, c"method".as_ptr());
+        push_str(state, &request.path);
+        ffi::lua_setfield(state, -2, c"path".as_ptr());
+        // nil rather than a placeholder string when there is no peer address,
+        // so `or` in Lua picks up a fallback as for every other field.
+        if let Some(addr) = &request.remote_addr {
+            push_str(state, addr);
+            ffi::lua_setfield(state, -2, c"remote_addr".as_ptr());
+        }
+
+        // `query` maps each name to its last value (PHP-style); `query_all`
+        // maps each name to the array of all its values, in order.
+        push_pairs(state, fields.query);
+        ffi::lua_createtable(state, 0, 0);
+        for (name, value) in fields.query {
+            push_str(state, name);
+            if ffi::lua_rawget(state, -2) == ffi::LUA_TNIL {
+                ffi::lua_pop(state, 1);
+                ffi::lua_createtable(state, 1, 0);
+                push_str(state, name);
+                ffi::lua_pushvalue(state, -2);
+                ffi::lua_rawset(state, -4);
             }
-        };
-        values.push(value.as_str())?;
-    }
-    table.set("query", query)?;
-    table.set("query_all", query_all)?;
+            push_str(state, value);
+            let n = ffi::lua_rawlen(state, -2);
+            ffi::lua_rawseti(state, -2, n as ffi::lua_Integer + 1);
+            ffi::lua_pop(state, 1);
+        }
+        ffi::lua_setfield(state, -3, c"query_all".as_ptr());
+        ffi::lua_setfield(state, -2, c"query".as_ptr());
 
-    // Headers: stored lowercased; a metatable makes lookups case-insensitive.
-    let headers = lua.create_table()?;
-    for (name, value) in &request.headers {
-        headers.set(name.as_str(), value.as_str())?;
+        // Stored lowercased; the metatable makes lookups case-insensitive.
+        push_pairs(state, &request.headers);
+        ffi::lua_getfield(state, ffi::LUA_REGISTRYINDEX, HEADERS_META.as_ptr());
+        ffi::lua_setmetatable(state, -2);
+        ffi::lua_setfield(state, -2, c"headers".as_ptr());
+
+        push_pairs(state, &request.cookies);
+        ffi::lua_setfield(state, -2, c"cookies".as_ptr());
+
+        ffi::lua_createtable(state, 0, 0);
+        ffi::lua_setfield(state, -2, c"body".as_ptr());
+        ffi::lua_createtable(state, 0, 0);
+        ffi::lua_setfield(state, -2, c"files".as_ptr());
     }
+    1
+}
+
+/// Installs what `build_request_table` needs on a state.
+fn install_request_table(lua: &Lua) -> mlua::Result<()> {
     let headers_meta = lua.create_table()?;
     headers_meta.set(
         "__index",
         lua.create_function(|_, (t, key): (Table, String)| t.raw_get::<Value>(key.to_lowercase()))?,
     )?;
-    headers.set_metatable(Some(headers_meta))?;
-    table.set("headers", headers)?;
+    let key = HEADERS_META.to_str().expect("registry key is ASCII");
+    lua.set_named_registry_value(key, headers_meta)?;
+    // SAFETY: see `lua_request_table`.
+    let build = unsafe { lua.create_c_function(lua_request_table)? };
+    lua.set_named_registry_value(REQUEST_TABLE_KEY, build)
+}
 
-    let cookies = lua.create_table()?;
-    for (name, value) in &request.cookies {
-        cookies.set(name.as_str(), value.as_str())?;
+fn build_request_table(lua: &Lua, request: &RequestData) -> mlua::Result<Table> {
+    let query_pairs: Vec<(String, String)> = serde_urlencoded::from_str(&request.query_string)
+        .unwrap_or_else(|e| {
+            log::warn!("failed to parse query string: {e}");
+            Vec::new()
+        });
+    let fields = RequestFields {
+        request,
+        query: &query_pairs,
+    };
+    let build: mlua::Function = lua.named_registry_value(REQUEST_TABLE_KEY)?;
+    PENDING_REQUEST.with(|p| p.set(&fields as *const RequestFields as *const ()));
+    let table = build.call::<Table>(());
+    PENDING_REQUEST.with(|p| p.set(std::ptr::null()));
+    let table = table?;
+
+    let content_type = request.content_type.as_deref().unwrap_or("");
+    let is_json = content_type.starts_with("application/json") || content_type.ends_with("+json");
+    if matches!(&request.body, RequestBody::Raw(bytes) if bytes.is_empty()) && !is_json {
+        return Ok(table);
     }
-    table.set("cookies", cookies)?;
 
     // Body: always a table so `pairs(request.body)` is safe. `request.files`
     // is always an array (uploads land there for multipart requests).
     let files_table = lua.create_table()?;
-    let content_type = request.content_type.as_deref().unwrap_or("");
     let body_table = match &request.body {
         RequestBody::Multipart { fields, files } => {
             for file in files {
@@ -1284,9 +1370,7 @@ fn build_request_table(lua: &Lua, request: &RequestData) -> mlua::Result<Table> 
                     t.set(name.as_str(), value.as_str())?;
                 }
                 t
-            } else if content_type.starts_with("application/json")
-                || content_type.ends_with("+json")
-            {
+            } else if is_json {
                 match serde_json::from_slice::<serde_json::Value>(bytes) {
                     Ok(json) => match lua.to_value(&json)? {
                         Value::Table(t) => t,
