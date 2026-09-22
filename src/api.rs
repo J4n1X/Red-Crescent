@@ -7,7 +7,8 @@
 //! Both run once per state, because states are pooled. `build_request_env` is
 //! what runs per request: a *closed* environment holding copies of the library
 //! and API tables, which a sandbox chaining to `_G` cannot substitute for --
-//! see POOLING-PLAN.md.
+//! see POOLING-PLAN.md. The copies outlive the request and are replaced by
+//! `reset_request_env` only once one has been modified.
 
 use std::cell::Cell;
 use std::os::raw::c_int;
@@ -507,9 +508,63 @@ fn find_module(cache: &TemplateCache, serve_dir: &Path, name: &str) -> mlua::Res
     Ok(Found::Missing(tried))
 }
 
-/// Registry key holding the per-request environment builder, out of reach of
+/// Registry keys for the environment builder and its reset, out of reach of
 /// template code.
 const ENV_BUILDER_KEY: &str = "rc_env_builder";
+const ENV_RESET_KEY: &str = "rc_env_reset";
+
+/// Library tables each request gets a private copy of. Copying is what makes a
+/// reused state safe: a sandbox chaining to _G would let one request's
+/// `string.upper = f` reach the next.
+const ENV_TABLES: &[&str] = &[
+    "string",
+    "table",
+    "math",
+    "os",
+    "io",
+    "coroutine",
+    "utf8",
+    "log",
+    "json",
+    "sqlite",
+    "crypto",
+    "fs",
+    "process",
+    "thread",
+    "server",
+];
+
+/// Shared by reference, since a Lua function value is immutable. Absent on
+/// purpose: getmetatable (getmetatable("").__index is the real string table,
+/// which no copy can hide), rawset (walks past the log table's read-only
+/// guard), dofile/loadfile (chunks bound to the real globals), and
+/// require/load, replaced in the builder.
+const ENV_FUNCS: &[&str] = &[
+    "assert",
+    "collectgarbage",
+    "error",
+    "ipairs",
+    "next",
+    "pairs",
+    "pcall",
+    "rawequal",
+    "rawget",
+    "rawlen",
+    "select",
+    "setmetatable",
+    "tonumber",
+    "tostring",
+    "type",
+    "unpack",
+    "xpcall",
+    "html_escape",
+    "print",
+    "exit",
+    "redirect",
+    "_out",
+    "_out_expr",
+    "_out_raw",
+];
 
 /// Lua 5.2+ takes the environment as `load`'s fourth argument.
 #[cfg(not(feature = "luajit"))]
@@ -532,85 +587,118 @@ const LOAD_SHIM: &str = r#"
     env.loadstring = env.load
 "#;
 
-/// Builds one request's environment. Compiled once per state; the function it
-/// returns is what runs per request.
+/// Builds one request's environment. Compiled once per state; it returns the
+/// per-request builder and the reset the pool runs between requests.
+///
+/// The copies live as long as the state and are replaced only once a request
+/// has changed one, so a clean request allocates none of them. The
+/// environment itself is fresh each time, from constructors sized in one go.
 const ENV_BUILDER: &str = r#"
 local shared = ...
 
 local search, include = shared.search, shared.include
 local set_cookie, send_file = shared.set_cookie, shared.send_file
 local native_require = shared.native_require
+local mark, unmodified = shared.mark_finalizers, shared.unmodified
 
--- Copied per request. Copying is what makes a reused state safe: a sandbox
--- chaining to _G would let one request's `string.upper = f` reach the next.
-local TABLES = {
-    "string", "table", "math", "os", "io", "coroutine", "utf8",
-    "log", "json", "sqlite", "crypto", "fs", "process", "thread", "server",
-}
--- Shared by reference, since a Lua function value is immutable. Absent on
--- purpose: getmetatable (getmetatable("").__index is the real string table,
--- which no copy can hide), rawset (walks past the log table's read-only
--- guard), dofile/loadfile (chunks bound to the real globals), and
--- require/load, replaced below.
-local FUNCS = {
-    "assert", "collectgarbage", "error", "ipairs", "next", "pairs", "pcall",
-    "rawequal", "rawget", "rawlen", "select", "setmetatable", "tonumber",
-    "tostring", "type", "unpack", "xpcall",
-    "html_escape", "print", "exit", "redirect", "_out", "_out_expr", "_out_raw",
-}
+local TABLES = { --[[TABLES]] }
+local FUNCS = { --[[FUNCS]] }
 
 local next, select, error, tostring, rawload, type = next, select, error, tostring, load, type
+local rawget, setmetatable = rawget, setmetatable
 local G, VERSION = _G, _VERSION
 local pkg_path, pkg_cpath = package.path, package.cpath
 local pkg_config, loadlib = package.config, package.loadlib
 
+-- A finalizer left for the incremental collector would run inside a later
+-- request, so anything that can create one marks this request for a full
+-- collection before the state is handed on.
+local function marked(f) return function(...) mark() return f(...) end end
+
+local funcs = {}
+for i = 1, #FUNCS do funcs[i] = G[FUNCS[i]] end
+for i = 1, #FUNCS do
+    if FUNCS[i] == "setmetatable" then
+        funcs[i] = function(t, mt)
+            if type(mt) == "table" and rawget(mt, "__gc") ~= nil then mark() end
+            return setmetatable(t, mt)
+        end
+    end
+end
+
 -- Resolved once per state. A name absent on this backend (utf8 on LuaJIT)
--- drops out here rather than being tested per request.
-local tnames, tvals, tmodule, nt = {}, {}, {}, 0
+-- stays a hole and drops out of the constructors below.
+local sources, ismodule = {}, {}
 for i = 1, #TABLES do
     local name = TABLES[i]
-    if type(G[name]) == "table" then
-        nt = nt + 1
-        tnames[nt], tvals[nt] = name, G[name]
+    local source = G[name]
+    if type(source) == "table" then
+        if name == "io" then
+            local wrapped = {}
+            for k, v in next, source do wrapped[k] = v end
+            for _, k in next, { "open", "lines", "popen", "tmpfile", "input", "output" } do
+                if type(source[k]) == "function" then wrapped[k] = marked(source[k]) end
+            end
+            source = wrapped
+        end
+        sources[i] = source
         -- Only what stock require already resolves stays require-able.
-        tmodule[nt] = package.loaded[name] ~= nil
-    end
-end
-local fnames, fvals, nf = {}, {}, 0
-for i = 1, #FUNCS do
-    local name = FUNCS[i]
-    if G[name] ~= nil then
-        nf = nf + 1
-        fnames[nf], fvals[nf] = name, G[name]
+        ismodule[i] = package.loaded[name] ~= nil
     end
 end
 
-return function()
-    local env, loaded, preload, loading = {}, {}, {}, {}
-
-    for i = 1, nt do
-        local source, copy = tvals[i], {}
-        for k, v in next, source do copy[k] = v end
-        local name = tnames[i]
-        env[name] = copy
-        if tmodule[i] then loaded[name] = copy end
+local copies, modules, sizes = {}, {}, {}
+local function copy_of(i)
+    local copy, n = {}, 0
+    for k, v in next, sources[i] do
+        copy[k] = v
+        n = n + 1
     end
-    for i = 1, nf do env[fnames[i]] = fvals[i] end
+    copies[i], sizes[i] = copy, n
+    if ismodule[i] then modules[i] = copy end
+end
+for i = 1, #TABLES do
+    if sources[i] ~= nil then copy_of(i) end
+end
 
-    env._G = env
-    env._VERSION = VERSION
-    loaded._G = env
+local function reset()
+    for i = 1, #TABLES do
+        local copy = copies[i]
+        if copy ~= nil and not unmodified(copy, sources[i], sizes[i]) then copy_of(i) end
+    end
+end
 
-    -- `loaded` is this request's, so module state dies with it. `searchers`
-    -- is absent rather than copied: require below does not consult it.
-    env.package = {
-        path = pkg_path,
-        cpath = pkg_cpath,
-        config = pkg_config,
-        loaded = loaded,
-        preload = preload,
-        loadlib = loadlib,
+local function build()
+    local env
+    local preload, loading = {}, {}
+    local loaded = { --[[LOADED]] _G = nil }
+    env = {
+        --[[ENV]]
+        _G = nil,
+        _VERSION = VERSION,
+        -- `loaded` is this request's, so module state dies with it. `searchers`
+        -- is absent rather than copied: require below does not consult it.
+        package = {
+            path = pkg_path,
+            cpath = pkg_cpath,
+            config = pkg_config,
+            loaded = loaded,
+            preload = preload,
+            loadlib = loadlib,
+        },
+        require = nil,
+        include = nil,
+        load = nil,
+        loadstring = nil,
+        response = {
+            status = 200,
+            headers = {},
+            set_cookie = set_cookie,
+            send_file = send_file,
+        },
     }
+    env._G = env
+    loaded._G = env
 
     --[[LOAD_SHIM]]
 
@@ -640,16 +728,88 @@ return function()
 
     env.include = function(rel) return include(rel, env) end
 
-    env.response = {
-        status = 200,
-        headers = {},
-        set_cookie = set_cookie,
-        send_file = send_file,
-    }
-
     return env
 end
+
+return build, reset
 "#;
+
+/// The builder source with its name lists and constructor fields filled in.
+fn env_builder_source() -> String {
+    let quoted = |names: &[&str]| {
+        names
+            .iter()
+            .map(|n| format!("{n:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let fields = |names: &[&str], array: &str| {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!("{n} = {array}[{}], ", i + 1))
+            .collect::<String>()
+    };
+    let env = fields(ENV_TABLES, "copies") + &fields(ENV_FUNCS, "funcs");
+    ENV_BUILDER
+        .replace("--[[TABLES]]", &quoted(ENV_TABLES))
+        .replace("--[[FUNCS]]", &quoted(ENV_FUNCS))
+        .replace("--[[LOADED]]", &fields(ENV_TABLES, "modules"))
+        .replace("--[[ENV]]", &env)
+        .replace("--[[LOAD_SHIM]]", LOAD_SHIM)
+}
+
+thread_local! {
+    /// Set when the running request created something with a finalizer.
+    static FINALIZERS: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn mark_finalizers() {
+    let _ = FINALIZERS.try_with(|f| f.set(true));
+}
+
+/// Whether a finalizer was created since the last call, clearing the mark.
+pub(crate) fn take_finalizers() -> bool {
+    FINALIZERS.try_with(|f| f.replace(false)).unwrap_or(true)
+}
+
+/// # Safety
+/// Touches only a const-init thread-local; cannot panic or raise.
+/// `unmodified(copy, source, size)`: whether `copy` still holds exactly the
+/// `size` entries of `source` and has no metatable. Raw reads throughout, so
+/// nothing a template planted can run here.
+///
+/// # Safety
+/// Called only by the environment reset, with two tables and an integer. It
+/// allocates nothing and cannot raise: the traversal never writes to `copy`,
+/// and the stack stays within the LUA_MINSTACK slots a C function is given.
+unsafe extern "C-unwind" fn lua_unmodified(state: *mut mlua::lua_State) -> c_int {
+    use mlua::ffi;
+    unsafe {
+        let mut same = ffi::lua_getmetatable(state, 1) == 0;
+        if !same {
+            ffi::lua_settop(state, 3);
+        }
+        let size = ffi::lua_tointeger(state, 3);
+        let mut n: ffi::lua_Integer = 0;
+        ffi::lua_pushnil(state);
+        while same && ffi::lua_next(state, 1) != 0 {
+            ffi::lua_pushvalue(state, -2);
+            ffi::lua_rawget(state, 2);
+            same = ffi::lua_rawequal(state, -1, -2) != 0;
+            ffi::lua_settop(state, -3);
+            n += 1;
+        }
+        ffi::lua_settop(state, 3);
+        ffi::lua_pushboolean(state, (same && n == size) as c_int);
+    }
+    1
+}
+
+unsafe extern "C-unwind" fn lua_mark_finalizers(_state: *mut mlua::lua_State) -> c_int {
+    mark_finalizers();
+    0
+}
 
 /// Installed once when a state is built. Nothing here may capture a request --
 /// a pooled state serves many; see [`with_state`].
@@ -920,8 +1080,19 @@ pub(crate) fn install_request_api(lua: &Lua, cfg: &RenderConfig) -> mlua::Result
         })?,
     )?;
 
-    let builder: mlua::Function = env_builder_factory(lua)?.call(shared)?;
+    // SAFETY: see `lua_unmodified`; only the builder holds it.
+    shared.set("unmodified", unsafe {
+        lua.create_c_function(lua_unmodified)?
+    })?;
+    // SAFETY: see `lua_mark_finalizers`.
+    shared.set("mark_finalizers", unsafe {
+        lua.create_c_function(lua_mark_finalizers)?
+    })?;
+
+    let (builder, reset): (mlua::Function, mlua::Function) =
+        env_builder_factory(lua)?.call(shared)?;
     lua.set_named_registry_value(ENV_BUILDER_KEY, builder)?;
+    lua.set_named_registry_value(ENV_RESET_KEY, reset)?;
 
     Ok(())
 }
@@ -935,7 +1106,7 @@ fn env_builder_factory(lua: &Lua) -> mlua::Result<mlua::Function> {
         return lua.load(code.as_slice()).into_function();
     }
     let function = lua
-        .load(ENV_BUILDER.replace("--[[LOAD_SHIM]]", LOAD_SHIM))
+        .load(env_builder_source())
         .set_name("=rc:env")
         .into_function()?;
     let _ = DUMPED.set(function.dump(false));
@@ -952,6 +1123,13 @@ pub(crate) fn build_request_env(lua: &Lua, request: &RequestData) -> mlua::Resul
     let env: Table = builder.call(())?;
     env.set("request", build_request_table(lua, request)?)?;
     Ok(env)
+}
+
+/// Readies a pooled state's copies for the next request, replacing any this
+/// one modified.
+pub(crate) fn reset_request_env(lua: &Lua) -> mlua::Result<()> {
+    let reset: mlua::Function = lua.named_registry_value(ENV_RESET_KEY)?;
+    reset.call(())
 }
 
 /// Whether the calling hook should abort this request. The watchdog owns the

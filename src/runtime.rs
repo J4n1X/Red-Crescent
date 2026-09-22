@@ -300,6 +300,8 @@ pub fn render(
         }
     };
     state.requests += 1;
+    // Left set by a state that was not pooled or not retained.
+    api::take_finalizers();
 
     let result = render_on(&state.lua, state.address, cfg, &template, request);
 
@@ -323,14 +325,34 @@ fn retain(
         return None;
     }
 
+    // First, so a replaced copy's contents are garbage by the collection.
+    api::reset_request_env(&state.lua).ok()?;
+
     // Not heap growth but finalizer timing: destroying a state used to close
     // its sqlite connections and files, so a request ending mid-transaction
-    // would now hand the next one an open write lock.
-    state.lua.gc_collect().ok()?;
+    // would hand the next one an open write lock, and a template's `__gc`
+    // would run inside the next request. Only requests that made one pay.
+    if api::take_finalizers() {
+        state.lua.gc_collect().ok()?;
+        // A finalizer that registered another would outlive this request.
+        if api::take_finalizers() {
+            return None;
+        }
+        api::reset_request_env(&state.lua).ok()?;
+    }
+    // `collectgarbage("stop")` must not outlive the request that called it.
+    state.lua.gc_restart();
+    // A pooled heap is mostly API tables that live as long as the state; a
+    // minor collection skips them, an incremental cycle marks them all.
+    #[cfg(feature = "lua54")]
+    state.lua.gc_gen(0, 0);
 
     // Keeps a heavy request from leaving the next with no headroom.
     if state.lua.used_memory() > cfg.limits.memory_bytes / 2 {
-        return None;
+        state.lua.gc_collect().ok()?;
+        if state.lua.used_memory() > cfg.limits.memory_bytes / 2 {
+            return None;
+        }
     }
     Some(state)
 }
@@ -591,6 +613,111 @@ print(string.upper("x"))
         let cfg = config(dir.path());
         assert_eq!(body(&cfg, &page).trim(), "POISONED");
         assert_eq!(body(&cfg, &page).trim(), "POISONED", "the copy leaked");
+    }
+
+    /// The copies are reused, not rebuilt, while no request touches them.
+    #[test]
+    fn an_untouched_copy_is_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(dir.path(), "p.lhtml", "<?lua print(tostring(string)) ?>");
+        let cfg = config(dir.path());
+        assert_eq!(body(&cfg, &page), body(&cfg, &page));
+    }
+
+    /// A metatable changes no field, so the reset has to look for it.
+    #[test]
+    fn a_planted_metatable_does_not_survive_the_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            r#"<?lua
+print(tostring(string.planted))
+setmetatable(string, { __index = function() return "PLANTED" end, __metatable = false })
+?>"#,
+        );
+        let cfg = config(dir.path());
+        assert_eq!(body(&cfg, &page).trim(), "nil");
+        assert_eq!(body(&cfg, &page).trim(), "nil", "the metatable survived");
+        assert_eq!(parked(), Some(2));
+    }
+
+    /// Every remaining entry still matches, so only the count gives it away.
+    #[test]
+    fn a_removed_entry_is_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            "<?lua print(type(string.upper)) string.upper = nil ?>",
+        );
+        let cfg = config(dir.path());
+        assert_eq!(body(&cfg, &page).trim(), "function");
+        assert_eq!(
+            body(&cfg, &page).trim(),
+            "function",
+            "the entry stayed gone"
+        );
+    }
+
+    /// Left to the incremental collector, the finalizer would run inside a
+    /// later request and write into its response.
+    #[test]
+    fn a_finalizer_never_runs_in_a_later_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let plant = write(
+            dir.path(),
+            "plant.lhtml",
+            r#"<?lua setmetatable({}, { __gc = function() print("GHOST") end }) ?>ok"#,
+        );
+        let churn = write(
+            dir.path(),
+            "churn.lhtml",
+            "<?lua for i = 1, 20000 do local t = { i } end ?>clean",
+        );
+        let cfg = config(dir.path());
+        assert_eq!(body(&cfg, &plant), "ok");
+        for _ in 0..3 {
+            assert_eq!(body(&cfg, &churn), "clean");
+        }
+        assert_eq!(parked(), Some(4));
+    }
+
+    /// One that registers another would outlive the forced collection too.
+    /// 5.1 has no table finalizers, so LuaJIT has nothing to retire.
+    #[cfg(not(feature = "luajit"))]
+    #[test]
+    fn a_resurrecting_finalizer_retires_the_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            r#"<?lua
+local mt = {}
+mt.__gc = function(o) setmetatable(o, mt) end
+setmetatable({}, mt)
+?>ok"#,
+        );
+        let cfg = config(dir.path());
+        assert_eq!(body(&cfg, &page), "ok");
+        assert_eq!(parked(), None, "a state with a live finalizer was parked");
+    }
+
+    #[test]
+    fn a_stopped_collector_is_restarted() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            r#"<?lua print(tostring(collectgarbage("isrunning"))) collectgarbage("stop") ?>"#,
+        );
+        let cfg = config(dir.path());
+        assert_eq!(body(&cfg, &page).trim(), "true");
+        assert_eq!(
+            body(&cfg, &page).trim(),
+            "true",
+            "the collector stayed stopped"
+        );
     }
 
     #[test]
