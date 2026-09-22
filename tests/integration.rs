@@ -1,5 +1,6 @@
 mod common;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use actix_web::dev::{Service, ServiceResponse};
@@ -823,4 +824,181 @@ async fn out_expr_renders_every_value_type() {
              table:[[1,2]]\nfunc:[&lt;function&gt;]\nraw:[<b>]\nbigint:[{bigint}]\n"
         )
     );
+}
+
+async fn status_and_body<S>(app: &S, uri: &str) -> (StatusCode, String)
+where
+    S: Service<actix_http::Request, Response = ServiceResponse, Error = actix_web::Error>,
+{
+    let resp = test::call_service(app, test::TestRequest::get().uri(uri).to_request()).await;
+    (resp.status(), body_string(resp).await)
+}
+
+/// A serve directory with symlinks inside and out of it, and the directory
+/// the outward ones point at.
+fn symlinked_site() -> (tempfile::TempDir, tempfile::TempDir) {
+    let outside = tempfile::tempdir().unwrap();
+    for name in ["secret.txt", "page.lhtml", "index.lhtml"] {
+        std::fs::write(outside.path().join(name), "OUTSIDE").unwrap();
+    }
+
+    let serve = tempfile::tempdir().unwrap();
+    let s = serve.path();
+    std::fs::create_dir(s.join("sub")).unwrap();
+    std::fs::write(s.join("sub/index.lhtml"), "SUB INDEX").unwrap();
+    std::fs::write(s.join("real.txt"), "REAL").unwrap();
+    std::fs::write(s.join("m.lua"), "return 1").unwrap();
+    std::fs::write(s.join(".env"), "HIDDEN").unwrap();
+    let link = |target: PathBuf, name: &str| std::os::unix::fs::symlink(target, s.join(name));
+    link(outside.path().join("secret.txt"), "leak.txt").unwrap();
+    link(outside.path().join("page.lhtml"), "leak.lhtml").unwrap();
+    link(outside.path().to_path_buf(), "out").unwrap();
+    link("sub".into(), "alias").unwrap();
+    link("real.txt".into(), "link.txt").unwrap();
+    link(s.canonicalize().unwrap().join("real.txt"), "abs.txt").unwrap();
+    link("m.lua".into(), "code.txt").unwrap();
+    link(".env".into(), "env.txt").unwrap();
+    (serve, outside)
+}
+
+#[actix_web::test]
+async fn request_paths_cannot_follow_a_symlink_out_of_the_serve_dir() {
+    let (serve, _outside) = symlinked_site();
+    let app = app_with(common::test_config(serve.path().to_str().unwrap()))
+        .await
+        .0;
+    for uri in [
+        "/leak.txt",
+        "/leak.lhtml",
+        "/out/secret.txt",
+        "/out/page.lhtml",
+        "/out",
+        "/out/",
+    ] {
+        let (status, body) = status_and_body(&app, uri).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "uri: {uri}");
+        assert!(!body.contains("OUTSIDE"), "uri {uri} leaked: {body}");
+    }
+}
+
+#[actix_web::test]
+async fn symlinks_inside_the_serve_dir_resolve_to_their_target() {
+    let (serve, _outside) = symlinked_site();
+    let app = app_with(common::test_config(serve.path().to_str().unwrap()))
+        .await
+        .0;
+    for (uri, want) in [
+        ("/link.txt", "REAL"),
+        ("/abs.txt", "REAL"),
+        ("/alias", "SUB INDEX"),
+        ("/alias/", "SUB INDEX"),
+    ] {
+        let (status, body) = status_and_body(&app, uri).await;
+        assert_eq!(status, StatusCode::OK, "uri: {uri}");
+        assert_eq!(body, want, "uri: {uri}");
+    }
+    // The target's name decides, not the link's.
+    for uri in ["/code.txt", "/env.txt"] {
+        let (status, _) = status_and_body(&app, uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "uri: {uri}");
+    }
+}
+
+#[actix_web::test]
+async fn hidden_files_are_never_served() {
+    let (serve, _outside) = symlinked_site();
+    std::fs::create_dir(serve.path().join(".git")).unwrap();
+    std::fs::write(serve.path().join(".git/config"), "HIDDEN").unwrap();
+    let app = app_with(common::test_config(serve.path().to_str().unwrap()))
+        .await
+        .0;
+    for uri in ["/.env", "/./.env", "//.env", "/.git/config"] {
+        let (status, body) = status_and_body(&app, uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "uri: {uri}");
+        assert!(!body.contains("HIDDEN"), "uri {uri} leaked: {body}");
+    }
+}
+
+#[actix_web::test]
+async fn directories_serve_their_index_and_nothing_else() {
+    let (serve, _outside) = symlinked_site();
+    std::fs::create_dir(serve.path().join("empty")).unwrap();
+    let app = app_with(common::test_config(serve.path().to_str().unwrap()))
+        .await
+        .0;
+    for uri in ["/sub", "/sub/", "//sub", "/./sub/"] {
+        let (status, body) = status_and_body(&app, uri).await;
+        assert_eq!(status, StatusCode::OK, "uri: {uri}");
+        assert_eq!(body, "SUB INDEX", "uri: {uri}");
+    }
+    for uri in ["/empty/", "/real.txt/", "/sub/index.lhtml/"] {
+        let (status, _) = status_and_body(&app, uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "uri: {uri}");
+    }
+}
+
+/// Nothing about resolution is cached: a file that appears, vanishes, or
+/// turns into a symlink out of the serve directory is seen on the next request.
+#[actix_web::test]
+async fn resolution_follows_changes_on_disk() {
+    let (serve, outside) = symlinked_site();
+    let app = app_with(common::test_config(serve.path().to_str().unwrap()))
+        .await
+        .0;
+    let file = serve.path().join("late.txt");
+
+    assert_eq!(
+        status_and_body(&app, "/late.txt").await.0,
+        StatusCode::NOT_FOUND
+    );
+    std::fs::write(&file, "LATE").unwrap();
+    assert_eq!(status_and_body(&app, "/late.txt").await.1, "LATE");
+
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), &file).unwrap();
+    assert_eq!(
+        status_and_body(&app, "/late.txt").await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(
+        status_and_body(&app, "/late.txt").await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // A directory on the way, swapped for a symlink out.
+    assert_eq!(status_and_body(&app, "/sub/").await.0, StatusCode::OK);
+    std::fs::rename(serve.path().join("sub"), serve.path().join("sub.old")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), serve.path().join("sub")).unwrap();
+    assert_eq!(
+        status_and_body(&app, "/sub/").await.0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[actix_web::test]
+async fn include_cannot_follow_a_symlink_out_of_the_serve_dir() {
+    let (serve, _outside) = symlinked_site();
+    std::fs::write(
+        serve.path().join("inc.lhtml"),
+        "<?lua local ok, err = pcall(include, request.query.p) ?>\
+         <?lua= ok and 'INCLUDED' or tostring(err) ?>",
+    )
+    .unwrap();
+    let app = app_with(common::test_config(serve.path().to_str().unwrap()))
+        .await
+        .0;
+
+    for p in ["leak.lhtml", "out/page.lhtml"] {
+        let (_, body) = status_and_body(&app, &format!("/inc.lhtml?p={p}")).await;
+        assert!(
+            body.contains("escapes the serve directory"),
+            "p {p}: {body}"
+        );
+    }
+    let (_, body) = status_and_body(&app, "/inc.lhtml?p=alias/index.lhtml").await;
+    assert_eq!(body, "SUB INDEXINCLUDED");
+    let (_, body) = status_and_body(&app, "/inc.lhtml?p=nope.lhtml").await;
+    assert!(body.contains("file not found"), "{body}");
 }

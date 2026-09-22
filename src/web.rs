@@ -22,6 +22,7 @@ use futures_util::StreamExt;
 
 use crate::api::html_escape;
 use crate::config::Config;
+use crate::resolve::{Resolved, resolve};
 use crate::runtime::{
     RenderConfig, RenderError, RenderedResponse, RequestBody, RequestData, SendFileSpec,
     UploadedFile, render,
@@ -51,22 +52,19 @@ pub async fn handler(
         _ => return HttpResponse::BadRequest().body("400 Bad Request: invalid path encoding"),
     };
 
-    // Canonicalization below is authoritative; this just rejects the obvious
-    // case without touching the filesystem.
+    // `resolve` is authoritative; this just rejects the obvious case without
+    // touching the filesystem.
     let relative = decoded_path.trim_start_matches('/');
     if relative.split(['/', '\\']).any(|seg| seg == "..") {
         log::trace!("rejected path with parent-directory segment: {decoded_path}");
         return forbidden();
     }
 
-    let mut target = data.serve_dir.join(relative);
-    if target.is_dir() {
-        target.push(&data.config.index);
-    }
-
-    let abs = match target.canonicalize() {
-        Ok(abs) if abs.starts_with(&data.serve_dir) => abs,
-        Ok(abs) => {
+    let index = Some(data.config.index.as_str());
+    let static_read = |p: &Path| data.config.static_files && !is_lhtml(p);
+    let (abs, meta, file) = match resolve(&data.serve_dir, relative, index, static_read) {
+        Resolved::Found(found) => (found.path, found.meta, found.file),
+        Resolved::Escaped(abs) => {
             log::warn!(
                 "prevented path escape: {} -> {}",
                 decoded_path,
@@ -76,17 +74,14 @@ pub async fn handler(
         }
         // Nothing on disk. A configured front controller gets the request
         // instead of a 404, with the original path still in `request.path`.
-        Err(_) => match &data.fallback {
-            Some(path) => path.clone(),
+        Resolved::Missing => match &data.fallback {
+            Some(path) => (path.clone(), None, None),
             None => return not_found(),
         },
     };
 
-    let is_lhtml = abs
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("lhtml"));
-    if !is_lhtml {
-        return serve_static(&req, &data, &abs).await;
+    if !is_lhtml(&abs) {
+        return serve_static(&req, &data, &abs, file).await;
     }
 
     // --- read the body (multipart → spool, everything else → bytes) -----
@@ -175,15 +170,32 @@ pub async fn handler(
     let outcome = if !budget.is_zero() && runs_inline(&abs) {
         let cfg = &data.render_cfg;
         std::panic::catch_unwind(AssertUnwindSafe(|| {
-            timed_render(cfg, &abs, &display_name, &request_data, budget)
+            timed_render(
+                cfg,
+                &abs,
+                meta.as_ref(),
+                &display_name,
+                &request_data,
+                budget,
+            )
         }))
         .map_err(|_| "render panicked".to_string())
     } else {
         let render_cfg = Arc::clone(&data.render_cfg);
         let path = abs.clone();
-        web::block(move || timed_render(&render_cfg, &path, &display_name, &request_data, budget))
-            .await
-            .map_err(|e| e.to_string())
+        web::block(move || {
+            let meta = meta.as_ref();
+            timed_render(
+                &render_cfg,
+                &path,
+                meta,
+                &display_name,
+                &request_data,
+                budget,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())
     };
 
     remove_spooled(spooled).await;
@@ -233,6 +245,7 @@ struct Timed {
 fn timed_render(
     cfg: &RenderConfig,
     abs: &Path,
+    meta: Option<&std::fs::Metadata>,
     display_name: &str,
     request: &RequestData,
     budget: Duration,
@@ -240,7 +253,7 @@ fn timed_render(
     crate::api::take_blocking();
     let started = Instant::now();
     let usage = (!budget.is_zero()).then(ThreadUsage::now);
-    let result = render(cfg, abs, display_name, request);
+    let result = render(cfg, abs, meta, display_name, request);
     let wall = started.elapsed();
     // Within budget by the wall clock is within it by any measure.
     let cost = match usage {
@@ -631,7 +644,17 @@ async fn serve_send_file(req: &HttpRequest, rendered: RenderedResponse) -> HttpR
     resp
 }
 
-async fn serve_static(req: &HttpRequest, data: &AppState, abs: &Path) -> HttpResponse {
+/// Static files smaller than this are read on the async worker instead of
+/// hopping to the blocking pool, which cost more than the read itself.
+const SYNC_READ_BELOW: u64 = 64 * 1024;
+
+/// `file` is `abs` already opened, if resolving did that.
+async fn serve_static(
+    req: &HttpRequest,
+    data: &AppState,
+    abs: &Path,
+    file: Option<std::fs::File>,
+) -> HttpResponse {
     if !data.config.static_files {
         return not_found();
     }
@@ -655,13 +678,23 @@ async fn serve_static(req: &HttpRequest, data: &AppState, abs: &Path) -> HttpRes
         return not_found();
     }
 
-    match actix_files::NamedFile::open_async(abs).await {
-        Ok(file) => file.into_response(req),
+    let opened = match file {
+        Some(file) => Ok(file),
+        None => std::fs::File::open(abs),
+    }
+    .and_then(|file| actix_files::NamedFile::from_file(file, abs));
+    match opened {
+        Ok(file) => file.read_mode_threshold(SYNC_READ_BELOW).into_response(req),
         Err(e) => {
             log::trace!("static file open failed for {}: {e}", abs.display());
             not_found()
         }
     }
+}
+
+fn is_lhtml(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("lhtml"))
 }
 
 fn build_request_data(

@@ -67,7 +67,7 @@ fn main() {
     let q = format!("rows={rows}");
 
     for _ in 0..50 {
-        render(&cfg, &page, "list.lhtml", &request(&q)).unwrap();
+        render(&cfg, &page, None, "list.lhtml", &request(&q)).unwrap();
     }
 
     let profile = std::env::var("NOPROF").is_err();
@@ -81,7 +81,7 @@ fn main() {
 
     let t = std::time::Instant::now();
     for _ in 0..iters {
-        render(&cfg, &page, "list.lhtml", &request(&q)).unwrap();
+        render(&cfg, &page, None, "list.lhtml", &request(&q)).unwrap();
     }
     let us = t.elapsed().as_secs_f64() * 1e6 / iters as f64;
 
