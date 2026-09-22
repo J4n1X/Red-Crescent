@@ -419,6 +419,7 @@ pub(crate) fn install_core(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
                     "thread.join: seconds must be zero or more",
                 ));
             }
+            mark_blocking();
             let waited = Duration::from_secs_f64(seconds.min(crate::threads::MAX_JOIN_SECS));
             let Some((status, result, error)) = registry.join(id, waited) else {
                 return Ok((Value::Nil, Value::Nil));
@@ -762,6 +763,20 @@ fn env_builder_source() -> String {
 thread_local! {
     /// Set when the running request created something with a finalizer.
     static FINALIZERS: Cell<bool> = const { Cell::new(false) };
+}
+
+thread_local! {
+    /// Set when the running request called something that can wait for seconds.
+    static BLOCKING: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn mark_blocking() {
+    let _ = BLOCKING.try_with(|b| b.set(true));
+}
+
+/// Whether a blocking call was made since the last call, clearing the mark.
+pub(crate) fn take_blocking() -> bool {
+    BLOCKING.try_with(|b| b.replace(false)).unwrap_or(true)
 }
 
 pub(crate) fn mark_finalizers() {

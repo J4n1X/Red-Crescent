@@ -1,0 +1,1 @@
+<?lua if request.query.spin then while true do end end ?>ok

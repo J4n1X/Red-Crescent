@@ -82,7 +82,7 @@ All options as flags and environment variables (`--help` for the full list):
 |---|---|---|---|
 | `--bind` | `RC_BIND` | `127.0.0.1:8080` | Address to listen on |
 | `--serve-dir` | `RC_SERVE_DIR` | `./demos` | Directory served |
-| `--workers` | `RC_WORKERS` | `4` | HTTP worker threads |
+| `--workers` | `RC_WORKERS` | CPU cores | HTTP worker threads |
 | `--timeout-ms` | `RC_TIMEOUT_MS` | `5000` | Lua execution time limit per request |
 | `--memory-limit-mb` | `RC_MEMORY_LIMIT_MB` | `64` | Lua memory limit per request |
 | `--max-body-size` | `RC_MAX_BODY_SIZE` | `1048576` | Non-multipart body cap in bytes (413 beyond) |
@@ -96,6 +96,7 @@ All options as flags and environment variables (`--help` for the full list):
 | `--c-module-dir` | `RC_C_MODULE_DIRS` | — | Directory of native `.so` Lua modules `require` may load, repeatable (off by default; needs a `--features c-modules` build) |
 | `--lua-pool` | `RC_LUA_POOL` | `true` | Reuse Lua states between requests; forced off when C modules are enabled |
 | `--lua-pool-max-requests` | `RC_LUA_POOL_MAX_REQUESTS` | `10000` | Requests one pooled state serves before it is retired |
+| `--inline-render-budget-us` | `RC_INLINE_RENDER_BUDGET_US` | `1000` | Templates that reliably render within this run on the HTTP worker instead of the blocking pool; `0` always uses the pool |
 | `--static-files` | `RC_STATIC_FILES` | `true` | Serve non-`.lhtml` files |
 | `--index` | `RC_INDEX` | `index.lhtml` | File served for `/` and directories |
 | `--fallback` | `RC_FALLBACK` | — | Template rendered when a path resolves to no file (front controller) |
@@ -526,7 +527,10 @@ load only modules you would trust with the whole process.
 
 ## Performance
 
-- Lua executes on blocking threads (`web::block`), so async workers keep serving other requests while a template runs.
+- Templates start on the blocking pool (`web::block`), so a slow one never holds an HTTP worker.
+  One with a run of renders under `--inline-render-budget-us` moves onto the worker itself,
+  saving the ~25 µs and two thread switches the handoff costs; a single slow render sends it
+  back, and one that calls `thread.join` or `process.run` never leaves the pool.
 - Templates are compiled once and cached (keyed by mtime + size); disabled in `--dev`.
 - Output goes through a Rust-side buffer — no quadratic string concatenation.
 - Lua states are pooled per thread, which removes ~265 µs of setup per request: on the reference
