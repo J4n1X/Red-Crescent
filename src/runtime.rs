@@ -1,18 +1,18 @@
 //! Per-request Lua execution.
 //!
-//! Each request gets a fresh `Lua` instance, created and dropped inside the
-//! blocking closure that calls [`render`] — nothing Lua-flavored crosses a
-//! thread boundary, which is what lets us build without mlua's `send` feature
-//! and gives perfect request isolation by construction.
+//! States come from a thread-local pool, so nothing Lua-flavored crosses a
+//! thread boundary and mlua's `send` feature stays off. Isolation comes from
+//! the closed environment each request runs in, not from destroying the state
+//! — see `api`. C modules can reach past it, so they turn pooling off.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-use mlua::{HookTriggers, Lua, Table, Value, VmState};
+use mlua::{Lua, Table, Value};
 
 use crate::api;
 use crate::template::{TemplateCache, TemplateError};
@@ -41,13 +41,23 @@ pub struct ThreadLimits {
     pub memory_bytes: usize,
 }
 
-/// How often the timeout hook fires, in VM instructions. Low enough to catch
-/// runaway loops quickly, high enough to keep overhead negligible.
-const HOOK_INSTRUCTION_INTERVAL: u32 = 10_000;
+/// Pool key: a state bakes its config's directories, cache and limits into its
+/// closures. `new` is the only constructor and never repeats.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ConfigId(u64);
+
+impl ConfigId {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        ConfigId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 /// Everything the blocking render closure needs; all fields are Send.
 #[derive(Clone)]
 pub struct RenderConfig {
+    pub id: ConfigId,
     /// Canonicalized serve directory (include/require are confined to it).
     pub serve_dir: PathBuf,
     /// Canonicalized data directory (sqlite/send_file/uploads are confined to it).
@@ -56,8 +66,6 @@ pub struct RenderConfig {
     pub limits: Limits,
     /// Request-size limits, surfaced to Lua so apps can show them in forms.
     pub max_body_size: usize,
-    /// Page output buffered in Lua before draining; JIT backends only.
-    pub output_buffer_bytes: usize,
     pub max_upload_size: usize,
     pub max_upload_files: usize,
     /// Which named background threads are alive, process-wide.
@@ -68,8 +76,13 @@ pub struct RenderConfig {
     /// Thread limits; `limits` above is the per-request budget.
     pub thread_limits: ThreadLimits,
     /// `package.cpath` for native modules, `None` when disabled (the default).
-    /// `Some` also means the state must be built in unsafe mode — see `new_lua`.
+    /// `Some` also means the state must be built in unsafe mode — see
+    /// `new_lua` — and that pooling is off whatever `pool` says.
     pub c_module_path: Option<Arc<str>>,
+    pub pool: bool,
+    /// Requests one pooled state serves before retirement, in the style of
+    /// php-fpm's `pm.max_requests`. A backstop; the heap stays flat on its own.
+    pub pool_max_requests: u32,
 }
 
 /// Build the Lua state for a request or a thread.
@@ -179,13 +192,14 @@ impl fmt::Display for RenderError {
     }
 }
 
-/// State shared between the Rust-side API callbacks of one request.
+/// State shared between the Rust-side API callbacks of one request. Reached
+/// through a thread-local rather than captured, so the callbacks can be built
+/// once per pooled state.
 pub(crate) struct RenderState {
     pub out: RefCell<Vec<u8>>,
     pub cookies: RefCell<Vec<LuaCookie>>,
     pub redirect: RefCell<Option<(String, u16)>>,
     pub send_file: RefCell<Option<SendFileSpec>>,
-    pub timed_out: Cell<bool>,
     pub include_depth: Cell<u32>,
 }
 
@@ -196,7 +210,6 @@ impl RenderState {
             cookies: RefCell::new(Vec::new()),
             redirect: RefCell::new(None),
             send_file: RefCell::new(None),
-            timed_out: Cell::new(false),
             include_depth: Cell::new(0),
         }
     }
@@ -214,18 +227,6 @@ impl fmt::Display for ExitSignal {
 
 impl std::error::Error for ExitSignal {}
 
-/// Raised from the instruction hook once the deadline passes.
-#[derive(Debug)]
-struct TimeoutSignal;
-
-impl fmt::Display for TimeoutSignal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "execution time limit exceeded")
-    }
-}
-
-impl std::error::Error for TimeoutSignal {}
-
 pub(crate) fn template_error_to_render_error(e: TemplateError, file: &str) -> RenderError {
     match e {
         TemplateError::NotFound => RenderError::NotFound,
@@ -236,6 +237,34 @@ pub(crate) fn template_error_to_render_error(e: TemplateError, file: &str) -> Re
             msg,
         },
     }
+}
+
+struct Pooled {
+    lua: Lua,
+    /// Address of `lua`'s state, handed to the watchdog each request.
+    address: usize,
+    config: ConfigId,
+    requests: u32,
+}
+
+thread_local! {
+    /// One, not a queue: a blocking thread renders one request at a time.
+    static POOLED: RefCell<Option<Pooled>> = const { RefCell::new(None) };
+}
+
+/// Build a state and return it with the address the watchdog interrupts it by.
+fn build_state(cfg: &RenderConfig) -> Result<(Lua, usize), RenderError> {
+    let lua = new_lua(cfg);
+    lua.set_memory_limit(cfg.limits.memory_bytes)
+        .map_err(|e| RenderError::Lua(format!("failed to set memory limit: {e}")))?;
+
+    // No hook is installed: Lua 5.4 traps every instruction once one is, which
+    // profiled at 11.7% of a render, and a JIT trace never reaches one anyway.
+    // The watchdog signals this thread to arm it, and only on expiry.
+    lua.set_app_data(crate::template::StateChunks::default());
+    api::install_request_api(&lua, cfg).map_err(|e| RenderError::Lua(e.to_string()))?;
+    let address = api::state_address(&lua).map_err(|e| RenderError::Lua(e.to_string()))?;
+    Ok((lua, address))
 }
 
 /// Render one template. Must run on a blocking thread — Lua executes
@@ -251,57 +280,90 @@ pub fn render(
         .load(template_abs, display_name)
         .map_err(|e| template_error_to_render_error(e, display_name))?;
 
-    let lua = new_lua(cfg);
-    lua.set_memory_limit(cfg.limits.memory_bytes)
-        .map_err(|e| RenderError::Lua(format!("failed to set memory limit: {e}")))?;
-
-    let state = Rc::new(RenderState::new());
-    // Points the raw `_out` at this request's buffer; restored on drop.
-    let _out_scope = api::OutputScope::new(&state);
-
-    let deadline = Instant::now() + cfg.limits.timeout;
-    {
-        let st = Rc::clone(&state);
-        lua.set_global_hook(
-            HookTriggers::new().every_nth_instruction(HOOK_INSTRUCTION_INTERVAL),
-            move |_lua, _debug| {
-                // Once expired, keep erroring on every trigger so a script-level
-                // pcall can delay the abort by at most one hook interval.
-                if st.timed_out.get() || Instant::now() >= deadline {
-                    st.timed_out.set(true);
-                    Err(mlua::Error::external(TimeoutSignal))
-                } else {
-                    Ok(VmState::Continue)
-                }
-            },
-        )
-        .map_err(|e| RenderError::Lua(format!("failed to install timeout hook: {e}")))?;
+    // A native module can reach past the request environment, so it cannot
+    // coexist with reuse. Opt-in, so the default path still pools.
+    if !cfg.pool || cfg.c_module_path.is_some() {
+        let (lua, address) = build_state(cfg)?;
+        return render_on(&lua, address, cfg, &template, request);
     }
 
-    api::install(&lua, &state, cfg, request).map_err(|e| RenderError::Lua(e.to_string()))?;
+    let mut state = match POOLED.with(|p| p.borrow_mut().take()) {
+        Some(pooled) if pooled.config == cfg.id => pooled,
+        _ => {
+            let (lua, address) = build_state(cfg)?;
+            Pooled {
+                lua,
+                address,
+                config: cfg.id,
+                requests: 0,
+            }
+        }
+    };
+    state.requests += 1;
+
+    let result = render_on(&state.lua, state.address, cfg, &template, request);
+
+    if let Some(state) = retain(state, cfg, &result) {
+        POOLED.with(|p| *p.borrow_mut() = Some(state));
+    }
+    result
+}
+
+/// The state, if it may serve another request.
+fn retain(
+    state: Pooled,
+    cfg: &RenderConfig,
+    result: &Result<RenderedResponse, RenderError>,
+) -> Option<Pooled> {
+    // Heap already at the ceiling, and reclaiming it takes two collections.
+    if matches!(result, Err(RenderError::Memory)) {
+        return None;
+    }
+    if state.requests >= cfg.pool_max_requests {
+        return None;
+    }
+
+    // Not heap growth but finalizer timing: destroying a state used to close
+    // its sqlite connections and files, so a request ending mid-transaction
+    // would now hand the next one an open write lock.
+    state.lua.gc_collect().ok()?;
+
+    // Keeps a heavy request from leaving the next with no headroom.
+    if state.lua.used_memory() > cfg.limits.memory_bytes / 2 {
+        return None;
+    }
+    Some(state)
+}
+
+fn render_on(
+    lua: &Lua,
+    address: usize,
+    cfg: &RenderConfig,
+    template: &Arc<crate::template::CompiledChunk>,
+    request: &RequestData,
+) -> Result<RenderedResponse, RenderError> {
+    let state = RenderState::new();
+    let _scope = api::RequestScope::new(&state);
+    // Released on drop, so an unwind cannot leave a deadline armed against the
+    // next request this thread serves.
+    let deadline = crate::watchdog::Deadline::new(cfg.limits.timeout, address);
+
+    let env = api::build_request_env(lua, request).map_err(|e| RenderError::Lua(e.to_string()))?;
 
     let exec_result = cfg
         .cache
-        .chunk(&lua, &template)
+        .chunk_for(lua, template, &env)
         .and_then(|chunk| chunk.call::<()>(()));
 
-    // On a JIT backend `_out` accumulates in Lua, so drain whatever is left
-    // before the body is read. Runs whatever the outcome: exit() and
-    // redirect() unwind through here and still keep their output.
-    #[cfg(feature = "luajit")]
-    if let Ok(flush) = lua.named_registry_value::<mlua::Function>(api::OUT_FLUSH_KEY) {
-        let _ = flush.call::<()>(());
-    }
-
-    // The flag catches timeouts even when a script pcall swallowed the signal.
-    if state.timed_out.get() {
+    // Catches a timeout even when a script pcall swallowed the signal: the
+    // watchdog's flag outlives the raise.
+    if deadline.slot().interrupted() {
         return Err(RenderError::Timeout);
     }
 
     if let Err(err) = exec_result {
         match classify_lua_error(&err) {
             LuaFailure::Exit => {} // clean early exit — fall through to the response
-            LuaFailure::Timeout => return Err(RenderError::Timeout),
             LuaFailure::Memory => return Err(RenderError::Memory),
             LuaFailure::Error => return Err(RenderError::Lua(err.to_string())),
         }
@@ -310,7 +372,7 @@ pub fn render(
     let mut status: u16 = 200;
     let mut headers: Vec<(String, String)> = Vec::new();
 
-    if let Ok(response_table) = lua.globals().get::<Table>("response") {
+    if let Ok(response_table) = env.get::<Table>("response") {
         match response_table.get::<Value>("status") {
             Ok(Value::Nil) => {}
             Ok(value) => match status_from_value(&value) {
@@ -376,7 +438,6 @@ fn header_value_to_string(value: &Value) -> Option<String> {
 
 enum LuaFailure {
     Exit,
-    Timeout,
     Memory,
     Error,
 }
@@ -392,9 +453,6 @@ fn classify_lua_error(err: &mlua::Error) -> LuaFailure {
         if cause.downcast_ref::<ExitSignal>().is_some() {
             return LuaFailure::Exit;
         }
-        if cause.downcast_ref::<TimeoutSignal>().is_some() {
-            return LuaFailure::Timeout;
-        }
         if let Some(inner) = cause.downcast_ref::<mlua::Error>()
             && matches!(inner, mlua::Error::MemoryError(_))
         {
@@ -402,4 +460,197 @@ fn classify_lua_error(err: &mlua::Error) -> LuaFailure {
         }
     }
     LuaFailure::Error
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn config(dir: &Path) -> RenderConfig {
+        let serve_dir = dir.canonicalize().unwrap();
+        let data_dir = serve_dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        RenderConfig {
+            id: ConfigId::new(),
+            serve_dir,
+            data_dir,
+            cache: Arc::new(TemplateCache::new(true)),
+            limits: Limits {
+                timeout: Duration::from_secs(5),
+                memory_bytes: 32 * 1024 * 1024,
+            },
+            max_body_size: 4096,
+            max_upload_size: 4096,
+            max_upload_files: 4,
+            threads: Arc::new(ThreadRegistry::new()),
+            sqlite_idle_connections: 0,
+            thread_limits: ThreadLimits {
+                timeout: None,
+                memory_bytes: 1024 * 1024,
+            },
+            c_module_path: None,
+            pool: true,
+            pool_max_requests: 10_000,
+        }
+    }
+
+    fn request() -> RequestData {
+        RequestData {
+            method: "GET".to_string(),
+            path: "/p.lhtml".to_string(),
+            query_string: String::new(),
+            headers: Vec::new(),
+            cookies: Vec::new(),
+            content_type: None,
+            body: RequestBody::Raw(Vec::new()),
+            remote_addr: None,
+        }
+    }
+
+    fn body(cfg: &RenderConfig, page: &Path) -> String {
+        let rendered = render(cfg, page, "p.lhtml", &request()).expect("render failed");
+        String::from_utf8(rendered.body).unwrap()
+    }
+
+    /// Requests served by the state parked on this thread. Each test runs on
+    /// its own thread, so this sees only its own.
+    fn parked() -> Option<u32> {
+        POOLED.with(|p| p.borrow().as_ref().map(|s| s.requests))
+    }
+
+    #[test]
+    fn a_state_serves_request_after_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(dir.path(), "p.lhtml", "ok");
+        let cfg = config(dir.path());
+        for _ in 0..3 {
+            assert_eq!(body(&cfg, &page), "ok");
+        }
+        assert_eq!(parked(), Some(3), "state was not reused");
+    }
+
+    /// The attack the closed environment exists to stop: one request rewrites
+    /// a library function, a global and a module's table; the next must see
+    /// none of it, by either route into `string`.
+    #[test]
+    fn a_request_cannot_poison_the_next_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "m.lua", "return { n = 0 }");
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            r#"<?lua
+local m = require("m")
+print(("hello"):upper(), string.upper("x"), tostring(LEAKED), tostring(m.n))
+m.n = m.n + 1
+string.upper = function() return "POISONED" end
+LEAKED = "leaked"
+?>"#,
+        );
+        let cfg = config(dir.path());
+
+        let first = body(&cfg, &page);
+        assert_eq!(first.trim(), "HELLO X nil 0");
+        assert_eq!(body(&cfg, &page).trim(), first.trim());
+        assert_eq!(parked(), Some(2), "the test never exercised a reused state");
+    }
+
+    /// `getmetatable("").__index` is the real `string` table, which no copy
+    /// can hide, so the function is not in the environment at all.
+    #[test]
+    fn the_string_metatable_is_out_of_reach() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            "<?lua print(tostring(getmetatable), tostring(rawset)) ?>",
+        );
+        let cfg = config(dir.path());
+        assert_eq!(body(&cfg, &page).trim(), "nil nil");
+    }
+
+    /// A chunk built by `load` gets the request's environment, not the shared
+    /// globals behind it — otherwise it would be a way straight past the copy.
+    #[test]
+    fn a_loaded_chunk_stays_in_the_request_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            r#"<?lua
+load("string.upper = function() return 'POISONED' end")()
+print(string.upper("x"))
+?>"#,
+        );
+        let cfg = config(dir.path());
+        assert_eq!(body(&cfg, &page).trim(), "POISONED");
+        assert_eq!(body(&cfg, &page).trim(), "POISONED", "the copy leaked");
+    }
+
+    #[test]
+    fn the_request_ceiling_retires_a_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(dir.path(), "p.lhtml", "ok");
+        let mut cfg = config(dir.path());
+        cfg.pool_max_requests = 2;
+
+        body(&cfg, &page);
+        assert_eq!(parked(), Some(1));
+        body(&cfg, &page);
+        assert_eq!(parked(), None, "the ceiling did not retire the state");
+    }
+
+    #[test]
+    fn exhausting_the_memory_limit_retires_a_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            "<?lua local t = {} while true do t[#t + 1] = string.rep('x', 1024) end ?>",
+        );
+        let mut cfg = config(dir.path());
+        cfg.limits.memory_bytes = 4 * 1024 * 1024;
+
+        let Err(err) = render(&cfg, &page, "p.lhtml", &request()) else {
+            panic!("the memory limit was not hit");
+        };
+        assert!(matches!(err, RenderError::Memory), "got {err:?}");
+        assert_eq!(parked(), None, "a state at its ceiling was parked");
+
+        // The next request gets a fresh one and is unaffected.
+        let ok = write(dir.path(), "ok.lhtml", "fine");
+        assert_eq!(body(&cfg, &ok), "fine");
+    }
+
+    #[test]
+    fn pooling_can_be_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(dir.path(), "p.lhtml", "ok");
+        let mut cfg = config(dir.path());
+        cfg.pool = false;
+
+        assert_eq!(body(&cfg, &page), "ok");
+        assert_eq!(parked(), None);
+    }
+
+    /// A state bakes in its config, so one built for a different server must
+    /// never be handed on.
+    #[test]
+    fn a_state_is_never_shared_between_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(dir.path(), "p.lhtml", "ok");
+        let first = config(dir.path());
+        let second = config(dir.path());
+
+        body(&first, &page);
+        assert_eq!(parked(), Some(1));
+        body(&second, &page);
+        assert_eq!(parked(), Some(1), "a state crossed configs");
+    }
 }

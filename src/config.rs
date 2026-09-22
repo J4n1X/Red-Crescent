@@ -28,12 +28,9 @@ pub const DEFAULT_MEMORY_LIMIT_MB: usize = 64;
 pub const DEFAULT_THREAD_MEMORY_LIMIT_MB: usize = 256;
 /// Warm SQLite connections parked per database, per worker thread.
 pub const DEFAULT_SQLITE_IDLE_CONNECTIONS: usize = 2;
+/// A backstop against slow accumulation, so it is generous.
+pub const DEFAULT_LUA_POOL_MAX_REQUESTS: u32 = 10_000;
 pub const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024;
-/// Bytes of page output a JIT backend accumulates in Lua before draining to
-/// the response buffer. Ignored on non-JIT backends, which write straight
-/// through. Peak extra Lua memory is roughly twice this, so it is worth
-/// subtracting from the effective memory limit when tuning either.
-pub const DEFAULT_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 256 * 1024 * 1024;
 pub const DEFAULT_MAX_UPLOAD_FILES: usize = 256;
 
@@ -92,11 +89,6 @@ pub struct Settings {
     #[arg(long, env = "RC_MAX_BODY_SIZE")]
     pub max_body_size: Option<usize>,
 
-    /// Page output buffered in Lua before draining, in bytes; JIT backends
-    /// only [default: 65536]
-    #[arg(long, env = "RC_OUTPUT_BUFFER_BYTES")]
-    pub output_buffer_bytes: Option<usize>,
-
     /// Writable data directory: sandbox for sqlite databases, uploads and
     /// send_file; must not be inside the serve directory [default: ./data]
     #[arg(long, env = "RC_DATA_DIR")]
@@ -152,6 +144,16 @@ pub struct Settings {
     /// state out of mlua's safe mode — see the README [default: none]
     #[arg(long = "c-module-dir", env = "RC_C_MODULE_DIRS", value_delimiter = ',')]
     pub c_module_dirs: Vec<PathBuf>,
+
+    /// Reuse Lua states between requests instead of building one per request.
+    /// Always off when C modules are enabled [default: true]
+    #[arg(long, env = "RC_LUA_POOL", num_args = 0..=1, default_missing_value = "true")]
+    pub lua_pool: Option<bool>,
+
+    /// Requests one pooled Lua state serves before it is retired
+    /// [default: 10000]
+    #[arg(long, env = "RC_LUA_POOL_MAX_REQUESTS")]
+    pub lua_pool_max_requests: Option<u32>,
 }
 
 impl Settings {
@@ -185,7 +187,6 @@ pub struct Config {
     pub timeout_ms: u64,
     pub memory_limit_mb: usize,
     pub max_body_size: usize,
-    pub output_buffer_bytes: usize,
     pub data_dir: PathBuf,
     pub max_upload_size: usize,
     pub max_upload_files: usize,
@@ -206,6 +207,11 @@ pub struct Config {
     /// Directories `require` may load native `.so` modules from. Empty — the
     /// default — leaves C modules disabled entirely.
     pub c_module_dirs: Vec<PathBuf>,
+    /// Reuse Lua states between requests. Ignored when `c_module_dirs` is
+    /// non-empty, which forces a fresh state per request.
+    pub lua_pool: bool,
+    /// Requests one pooled state serves before it is retired.
+    pub lua_pool_max_requests: u32,
 }
 
 impl Default for Config {
@@ -239,11 +245,6 @@ impl Config {
                 DEFAULT_MEMORY_LIMIT_MB,
             ),
             max_body_size: pick(cli.max_body_size, file.max_body_size, DEFAULT_MAX_BODY_SIZE),
-            output_buffer_bytes: pick(
-                cli.output_buffer_bytes,
-                file.output_buffer_bytes,
-                DEFAULT_OUTPUT_BUFFER_BYTES,
-            ),
             data_dir: pick(
                 cli.data_dir.clone(),
                 file.data_dir,
@@ -276,6 +277,12 @@ impl Config {
                 DEFAULT_SQLITE_IDLE_CONNECTIONS,
             ),
             c_module_dirs: pick_list(&cli.c_module_dirs, file.c_module_dirs),
+            lua_pool: pick(cli.lua_pool, file.lua_pool, true),
+            lua_pool_max_requests: pick(
+                cli.lua_pool_max_requests,
+                file.lua_pool_max_requests,
+                DEFAULT_LUA_POOL_MAX_REQUESTS,
+            ),
         }
     }
 }

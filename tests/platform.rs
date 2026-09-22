@@ -37,7 +37,12 @@ async fn sqlite_round_trips_types_and_params() {
 
 #[actix_web::test]
 async fn crypto_primitives_work() {
-    let (app, _) = app_with(test_config("tests/fixtures")).await;
+    // argon2 is deliberately expensive and runs unoptimized here, so it needs
+    // a realistic budget rather than the harness default: this measured 1.3s
+    // in a debug build. Nothing on this page is about the timeout.
+    let mut config = test_config("tests/fixtures");
+    config.timeout_ms = 30_000;
+    let (app, _) = app_with(config).await;
     let resp = test::call_service(
         &app,
         test::TestRequest::get()

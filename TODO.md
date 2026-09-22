@@ -74,14 +74,98 @@ Two properties to accept before starting, neither fixable:
 Touches the core request path: `web.rs` (spawn, select on first message), `runtime.rs` (sender and
 flush plumbing), `api.rs` (`flush()` and the post-commit guards), plus tests.
 ### Per-request fixed cost: the heavy API tables
-Measured 2026-09-21 (release, in-process, avg of 2000): `Lua::new` 57us, `api::install` 64us,
-teardown ~45us -- about 170us before a template runs. Template and module parsing are both cached
-as bytecode now (see the two "bytecode cache" entries below), so what is left of the fixed cost is
-`install`: `sqlite`, `crypto`, `fs`, `process` and `thread` are built on every request and most
-pages touch none of them. Registering them behind an `__index` on the globals so they materialise
-on first use is worth roughly 30-40us. The "VM pooling: no" verdict below still stands for the
-`Lua::new` half: pooling is the only thing that removes it, and it trades a structural isolation
-guarantee for it.
+**Done 2026-09-22, by pooling instead.** State creation and `install` now happen once per pooled
+state rather than per request, which removed the whole ~170us rather than the 30-40us a lazy
+`install` would have. Measured in-process, release: a small page went 305.8us -> 45.6us, and a
+1000-row page 1125us -> 860us -- a flat ~265us either way, since the cost was fixed. End to end
+behind nginx, `hello` went 8,554 -> 26,188 rps.
+
+Lazy `install` is therefore moot for the pooled path. It would still help the opt-out path
+(`--lua-pool false`, and C-module deployments), which is **1.39x slower than before** because it
+builds a closed environment per request and then throws the state away: `hello` measured 12,823
+rps at 125db38 against 9,258 now. Fixing that means either lazy `install` or skipping the
+environment when not pooling -- the latter was rejected, since two isolation models would drift
+and only one would be under test.
+
+### LuaJIT: works, and is faster on heavy pages
+**2026-09-22.** Three things had to land together. The earlier verdict in this file that LuaJIT
+"is not faster" was wrong, and wrong for a measurable reason -- recorded below so it is not
+re-derived.
+
+**1. The timeout.** `lua_sethook` sets `g->hookmask` and `lj_dispatch_update` patches the
+*interpreter's* dispatch table, but hotcounting is keyed on `DISPMODE_JIT` and `lj_trace.c` guards
+only on `HOOK_GC`/`HOOK_VMEVENT`/`HOOK_PROFILE`, never `LUA_MASKCOUNT`. The loop compiles and the
+trace never consults the table. On `for i = 1, 5e8 do end` with hotloop 56, a count of 1 fired 62
+times then went silent; at 100 or more, never. `LUAJIT_ENABLE_CHECKHOOK` emits a volatile
+`hookmask` load in `lj_record_setup`, which for a loop trace lands in the loop body; a watchdog
+arming `lua_sethook(..., LUA_MASKCOUNT, 1)` then interrupts within **0.2ms** against **5.5s**
+without it. The flag costs 0% on a page, 0% on arithmetic and concat, +9% on the tightest
+table-store loop, and reaches the vendored build via `CFLAGS` in `.cargo/config.toml`.
+
+**2. The output path.** The Lua-side buffer made every `<?lua= ?>` cost a Rust callback *plus* a
+call back into Lua. Removed -- see below.
+
+**3. The one that actually mattered: chunks were reloaded per request.** Loading from bytecode
+each request hands LuaJIT a fresh prototype, so it records a trace, we discard it, and it records
+again: **1,555 traces for 1,550 requests**. Keeping the function per state and rebinding only its
+environment measured **2.57x** on a pure-Lua 1000-row page (201.2us -> 78.2us) and is a wash on
+lua54, which is exactly why nothing pointed at it. `TemplateCache::chunk_for` plus `StateChunks`
+in the state's app data.
+
+Per-render, in process, real template with all three in place:
+
+| rows | lua54 | luajit |
+| --- | --- | --- |
+| 100 | 198.6us | **139.8us** |
+| 1000 | 1605.8us | **1075.5us** |
+| 5000 | 7533.2us | **4419.3us** |
+
+End to end behind nginx, 64 conns, mean of two 8s passes, byte-identical output to PHP:
+
+| stack | hello | json | list1000 | list5000 |
+| --- | --- | --- | --- | --- |
+| PHP 8.4 | 55,145 | 48,597 | 6,104 | 1,256 |
+| RC lua54 | 29,524 | 18,857 | 2,427 | 543 |
+| RC luajit | 28,516 | 18,024 | **3,507** | **826** |
+
+So luajit is 1.44x lua54 on the 1000-row page and 1.52x at 5000, and ~3% behind on small
+responses where the cost is per-request Rust setup rather than Lua. The PHP gap on heavy pages
+went from the 3.29x in BENCHMARKS.md to **1.74x**.
+
+**Where the remaining time goes**, sampled with `cargo run --release --example profile_render`
+(lua54, 1000 rows, 1624us/render):
+
+| share | what |
+| --- | --- |
+| 14.7% | `luaV_execute` -- the interpreter itself |
+| 11.7% | `luaG_traceexec` + `rethook` -- **the timeout hook**; 5.4 traps every instruction once one is installed |
+| 12.2% | `luaS_newlstr` + `luaS_resize` -- string interning |
+| ~15% | mlua callback dispatch (`create_callback`, `stack_value`, `lua_tolstring`, pre/poscall) |
+| 8.5% | our own `escape_bytes` + `value_to_bytes` |
+
+**The 11.7% is gone: no hook is installed at all now.** The watchdog signals the rendering thread
+(`SIGURG`) and the handler arms `lua_sethook(..., LUA_MASKCOUNT, 1)` *on that thread*, so it never
+races the VM's own `L->ci` bookkeeping -- which is what made calling `lua_sethook` from the
+watchdog itself unsound on 5.4, and is the technique LuaJIT's source recommends. One mechanism for
+both backends; LuaJIT additionally needs `CHECKHOOK` for a trace to notice. The hook disarms
+itself on entry and consults the slot, so a signal that arrives after a request finished is a
+no-op, and the watchdog re-signals every tick so a `pcall` around the raise cannot escape.
+
+The remaining lever is converting `_out_expr` and `html_escape` to raw `lua_CFunction`s, which
+attacks the ~15% of mlua dispatch and is scoped below.
+
+### Upgrade mlua 0.11.5 -> 0.12.1
+**Checked 2026-09-22, clean, not applied.** The whole suite passes on 0.12.1 (134 tests, lua54)
+with one mechanical change: `mlua::String` -> `mlua::LuaString`, four call sites in `api.rs` and
+`crypto_api.rs`. Nothing else in the 0.12 breaking list touches this code -- not the module
+re-export shuffle, the GC interface refactor, `MaybeSync`, nor the removed
+`Error::ToLuaConversionError`. Left unapplied only to keep a dependency bump out of the pooling
+diff.
+
+`0.11.6` is also available and semver-compatible with the current `"0.11.5"` requirement, so
+`cargo update -p mlua` reaches it with no code change at all. It adds `lua55` and nothing we need.
+
+Neither version fixes the LuaJIT hook above.
 
 ### `_out` should be backend-dependent
 **Partly done 2026-09-21.** `_out` is now a raw `lua_CFunction` (`lua_out` in `src/api.rs`), fed by
@@ -342,9 +426,21 @@ Luau and luau-jit are out on both counts: `set_global_hook` is `#[cfg(not(featur
 this code uses it in three places, `StdLib::IO` and `StdLib::PACKAGE` do not exist there against 58
 `require(` calls, and luau-jit measured 5.1x lua54's VM creation for no warm gain on untyped code.
 
-**VM pooling: no.** Creation is 55us against an 8.2ms request -- 0.7% -- and reuse would convert
-"no state can leak between requests" from a structural guarantee into a discipline. A pooled VM
-staying JIT-warm is the only real argument for it, and the numbers above remove that argument.
+**VM pooling: done 2026-09-22, and the verdict below was wrong.** It read creation as 0.7% of an
+8.2ms Drive request, which is true and irrelevant: the workloads that pooling helps are the small
+ones, where the same 265us is most of the request. The isolation objection was answered by not
+relying on state lifetime at all -- each request gets a closed environment of copied library and
+API tables, so nothing it writes is reachable from the next. `getmetatable` and `rawset` are out
+of that environment because they route back to the shared tables. See POOLING-PLAN.md.
+
+One thing the plan missed: a fresh state released sqlite connections and open files by being
+destroyed. A pooled one has to `gc_collect()` after each request or a request that ended inside a
+transaction hands the next one an open write lock. That is 3-4us on a small page and unmeasurable
+on a large one, and there is a test for it.
+
+*Superseded, kept for the reasoning:* Creation is 55us against an 8.2ms request -- 0.7% -- and
+reuse would convert "no state can leak between requests" from a structural guarantee into a
+discipline. A pooled VM staying JIT-warm is the only real argument for it.
 
 **Cold VM creation, for reference:** lua54 55us, luajit 79us, luau 104us, luau-jit 283us. Template
 parsing is 46-90us cold but 1.6us on a cache hit, which is why there is nothing to overlap it with.
