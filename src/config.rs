@@ -20,7 +20,11 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
 pub const DEFAULT_SERVE_DIR: &str = "./demos";
 pub const DEFAULT_DATA_DIR: &str = "./data";
 pub const DEFAULT_INDEX: &str = "index.lhtml";
-pub const DEFAULT_WORKERS: usize = 4;
+/// One per core: a template rendering on its worker can use no more cores
+/// than there are workers.
+pub fn default_workers() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get())
+}
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
 pub const DEFAULT_MEMORY_LIMIT_MB: usize = 64;
 /// Higher than the request cap: a thread is long-lived and hitting this kills
@@ -30,6 +34,9 @@ pub const DEFAULT_THREAD_MEMORY_LIMIT_MB: usize = 256;
 pub const DEFAULT_SQLITE_IDLE_CONNECTIONS: usize = 2;
 /// A backstop against slow accumulation, so it is generous.
 pub const DEFAULT_LUA_POOL_MAX_REQUESTS: u32 = 10_000;
+/// Roughly forty pool handoffs' worth of CPU, and short enough that a
+/// connection waiting behind it barely notices.
+pub const DEFAULT_INLINE_RENDER_BUDGET_US: u64 = 1000;
 pub const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024;
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 256 * 1024 * 1024;
 pub const DEFAULT_MAX_UPLOAD_FILES: usize = 256;
@@ -73,7 +80,7 @@ pub struct Settings {
     #[serde(skip)]
     pub no_config: bool,
 
-    /// Number of HTTP worker threads [default: 4]
+    /// Number of HTTP worker threads [default: one per CPU core]
     #[arg(long, env = "RC_WORKERS")]
     pub workers: Option<usize>,
 
@@ -154,6 +161,12 @@ pub struct Settings {
     /// [default: 10000]
     #[arg(long, env = "RC_LUA_POOL_MAX_REQUESTS")]
     pub lua_pool_max_requests: Option<u32>,
+
+    /// Templates that reliably render within this many microseconds run on
+    /// the HTTP worker instead of the blocking pool. 0 always uses the pool
+    /// [default: 1000]
+    #[arg(long, env = "RC_INLINE_RENDER_BUDGET_US")]
+    pub inline_render_budget_us: Option<u64>,
 }
 
 impl Settings {
@@ -212,6 +225,8 @@ pub struct Config {
     pub lua_pool: bool,
     /// Requests one pooled state serves before it is retired.
     pub lua_pool_max_requests: u32,
+    /// Render time under which a template may run on the HTTP worker; 0 never.
+    pub inline_render_budget_us: u64,
 }
 
 impl Default for Config {
@@ -237,7 +252,7 @@ impl Config {
         Config {
             serve_dir: cli.serve_dir(),
             bind: pick(cli.bind.clone(), file.bind, DEFAULT_BIND.to_string()),
-            workers: pick(cli.workers, file.workers, DEFAULT_WORKERS),
+            workers: pick(cli.workers, file.workers, default_workers()),
             timeout_ms: pick(cli.timeout_ms, file.timeout_ms, DEFAULT_TIMEOUT_MS),
             memory_limit_mb: pick(
                 cli.memory_limit_mb,
@@ -282,6 +297,11 @@ impl Config {
                 cli.lua_pool_max_requests,
                 file.lua_pool_max_requests,
                 DEFAULT_LUA_POOL_MAX_REQUESTS,
+            ),
+            inline_render_budget_us: pick(
+                cli.inline_render_budget_us,
+                file.inline_render_budget_us,
+                DEFAULT_INLINE_RENDER_BUDGET_US,
             ),
         }
     }

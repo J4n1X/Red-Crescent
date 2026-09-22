@@ -47,6 +47,7 @@ pub fn test_config(serve_dir: &str) -> Config {
         c_module_dirs: Vec::new(),
         lua_pool: true,
         lua_pool_max_requests: red_crescent::config::DEFAULT_LUA_POOL_MAX_REQUESTS,
+        inline_render_budget_us: red_crescent::config::DEFAULT_INLINE_RENDER_BUDGET_US,
     }
 }
 

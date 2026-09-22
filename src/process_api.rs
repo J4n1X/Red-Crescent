@@ -53,6 +53,7 @@ fn drain(mut source: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<
 }
 
 fn run(lua: &Lua, spec: Table) -> mlua::Result<Table> {
+    crate::api::mark_blocking();
     let mut argv: Vec<String> = Vec::new();
     for value in spec.clone().sequence_values::<String>() {
         argv.push(value?);

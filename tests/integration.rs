@@ -261,6 +261,49 @@ async fn infinite_loop_is_stopped_by_timeout() {
     );
 }
 
+/// Promoted onto the HTTP worker by a run of fast renders, a template that
+/// then spins must still be stopped: the watchdog signals whichever thread
+/// renders.
+#[actix_web::test]
+async fn an_inline_render_is_still_stopped_by_the_timeout() {
+    let mut config = test_config();
+    config.inline_render_budget_us = 60_000_000;
+    let app = app_with(config).await.0;
+    for _ in 0..32 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/spin_after.lhtml")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(body_string(resp).await.trim(), "ok");
+    }
+    let started = Instant::now();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/spin_after.lhtml?spin=1")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "timeout took {:?}",
+        started.elapsed()
+    );
+    // Demoted, and the worker still serves.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/spin_after.lhtml")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(body_string(resp).await.trim(), "ok");
+}
+
 #[actix_web::test]
 async fn pcall_cannot_swallow_the_timeout() {
     let app = default_app().await;
