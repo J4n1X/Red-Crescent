@@ -246,9 +246,14 @@ fn scan_long_bracket(b: &[u8], start: usize, level: usize, nl: &mut u32) -> Opti
     None
 }
 
+/// Binds the output functions to locals so each call is a register read rather
+/// than a hash lookup in the environment -- a page emitting a thousand rows does
+/// several thousand of them. Carries no newline, so source lines still line up.
+const PROLOGUE: &str = "local _out,_out_expr,_out_raw=_out,_out_expr,_out_raw; ";
+
 /// Compile parsed segments into a single Lua chunk with source-aligned lines.
 pub fn generate(segments: &[Segment]) -> String {
-    let mut out = String::new();
+    let mut out = String::from(PROLOGUE);
     let mut cur_line: u32 = 1;
 
     for seg in segments {
@@ -758,17 +763,27 @@ mod tests {
         );
     }
 
+    /// The generated chunk minus the prologue these tests are not about.
+    fn generated_body(src: &str) -> String {
+        let generated = generate(&parse(src).unwrap());
+        generated
+            .strip_prefix(PROLOGUE)
+            .expect("every chunk starts with the prologue")
+            .to_string()
+    }
+
     #[test]
     fn html_containing_quotes_and_newlines_round_trips() {
         let src = "say \"hi\"\\\nnext";
-        let generated = generate(&parse(src).unwrap());
-        assert_eq!(generated, "_out(\"say \\\"hi\\\"\\\\\\nnext\"); ");
+        assert_eq!(generated_body(src), "_out(\"say \\\"hi\\\"\\\\\\nnext\"); ");
     }
 
     #[test]
     fn same_line_mix_generates_valid_statement_sequence() {
         let src = "<?lua if x then ?><b>y</b><?lua end ?>";
-        let generated = generate(&parse(src).unwrap());
-        assert_eq!(generated, " if x then  _out(\"<b>y</b>\");  end  ");
+        assert_eq!(
+            generated_body(src),
+            " if x then  _out(\"<b>y</b>\");  end  "
+        );
     }
 }

@@ -151,8 +151,63 @@ both backends; LuaJIT additionally needs `CHECKHOOK` for a trace to notice. The 
 itself on entry and consults the slot, so a signal that arrives after a request finished is a
 no-op, and the watchdog re-signals every tick so a `pcall` around the raise cannot escape.
 
-The remaining lever is converting `_out_expr` and `html_escape` to raw `lua_CFunction`s, which
-attacks the ~15% of mlua dispatch and is scoped below.
+### Rust-side render path — done 2026-09-22
+
+Four changes, measured one at a time against HEAD (`7b6aaf5`) with interleaved runs:
+
+| change | 1000 rows, lua54 |
+| --- | --- |
+| baseline (`7b6aaf5`) | 1423 us |
+| emit Lua strings without the intermediate `Vec` | 1386 us |
+| `_out_expr` as a raw `lua_CFunction` | 1153 us |
+| bind `_out*` to chunk locals | 1114 us |
+| restore the vectorisable no-escape scan | 1070 us |
+
+End to end, **1.21x at 100 rows, 1.28x at 1000, 1.24x at 5000** on lua54; **1.22x / 1.38x / 1.46x**
+on LuaJIT, which gains more because the raw call is a larger share of what it has left. LuaJIT is
+now 1.57x lua54 at 1000 rows and 1.80x at 5000.
+
+What each one was:
+
+- `value_to_bytes` copied every Lua string into a fresh `Vec` before escaping, and `escape_bytes`
+  allocated a second one. Both are gone; escaping writes straight into the request buffer. Worth
+  only ~2.5%, which is the useful part of the result: the allocations were never the cost.
+- `_out_expr` is now `lua_out_expr`, a raw C function, and it is where the win is (~18%). Strings,
+  numbers, booleans and nil are rendered in place; tables and functions go through a Lua closure
+  held in the registry under `rc_out_expr_slow`, which keeps the JSON and `<function>` behaviour
+  without any of it being reachable from the C frame. Numbers are formatted by **Rust**, not
+  `lua_tolstring`: `tostring(5.0)` is `"5.0"` on 5.4 and `"5"` on LuaJIT, and a template must not
+  be able to tell which backend it runs on. `lua_isinteger` splits integer from float exactly as
+  mlua's own `Value` conversion does, including through mlua-sys's LuaJIT shim, so 64-bit ids
+  survive on 5.4.
+- Every chunk now opens with `local _out,_out_expr,_out_raw=_out,_out_expr,_out_raw;`. Each call
+  was a hash lookup in the environment, several thousand per page; `luaH_getshortstr` went from
+  8.7% of the profile to 1.9%. The prologue carries no newline, so error line numbers still match
+  the `.lhtml` source.
+- Folding the no-escape check into the escaping loop turned a pure scan into one with side
+  effects, which the optimiser will not vectorise — it cost 4% until `first_escapable` was split
+  back out. The lesson is worth more than the 4%.
+
+`out_expr_types.lhtml` pins how each value type reaches the page; its expected output was taken
+from HEAD's own rendering, byte for byte. It caught a real bug immediately — the run-copying
+escaper dropped everything before the first escapable byte, which the old `html_escape` test
+missed because its input starts with `<` at index 0.
+
+**Where the time goes now** (lua54, 1000 rows, 1090us/render):
+
+| share | what |
+| --- | --- |
+| 20.1% | `luaV_execute` -- the interpreter itself |
+| 20.6% | `luaS_newlstr` + `luaS_resize` + `luaS_remove` -- string interning |
+| 9.0% | `luaD_precall` + `luaD_poscall` -- Lua's own call overhead |
+| 10.4% | ours: `escape_into` 5.7, `lua_out_expr` 3.3, `lua_out` 1.4 |
+| 5.9% | GC (`propagatemark`, `luaM_malloc_`) |
+| 1.7% | `<i64 as Display>::fmt` -- the number path above |
+
+Roughly 12% of a render is now Rust; the rest is the Lua VM. The interning figure is the fixture
+telling on itself — it builds two strings per row (`..` and `string.format`) — but that is what a
+real list page does. **The remaining levers are Lua-side, not Rust-side**: fewer allocations in the
+template, or LuaJIT.
 
 ### Upgrade mlua 0.11.5 -> 0.12.1
 **Checked 2026-09-22, clean, not applied.** The whole suite passes on 0.12.1 (134 tests, lua54)
@@ -168,45 +223,33 @@ diff.
 Neither version fixes the LuaJIT hook above.
 
 ### `_out` should be backend-dependent
-**Partly done 2026-09-21.** `_out` is now a raw `lua_CFunction` (`lua_out` in `src/api.rs`), fed by
-a thread-local that `OutputScope` in `render` points at the current request's buffer. `_out_expr`,
-`_out_raw` and `html_escape` are still mlua callbacks. The JIT/buffered variant below is untouched
-and still waiting on the LuaJIT decision. Remaining below:
+**Partly done 2026-09-21, extended 2026-09-22.** `_out` and `_out_expr` are raw `lua_CFunction`s
+(`lua_out`, `lua_out_expr` in `src/api.rs`), fed by a thread-local that `RequestScope` in `render`
+points at the current request's buffer. `_out_raw` and `html_escape` are still mlua callbacks, and
+neither appears in the profile -- `_out_raw` because templates use `<?lua= ?>` far more than
+`<?lua== ?>`, `html_escape` because nothing calls it in a loop. Leave both until something
+measured says otherwise; the raw versions are ~10 lines each over the same audited body.
 
-`_out` is an mlua callback today, ~105ns a call, and a 1000-row page makes ~8000 of them. Two
-cheaper implementations, chosen by which Lua backend is built (same 60,048-byte page):
+The measurements that decided it, on the same 60,048-byte page:
 
 | `_out` implementation | lua54 | luajit |
 | --- | --- | --- |
-| mlua callback (today) | 1371 us | 926 us |
+| mlua callback | 1371 us | 926 us |
 | raw `lua_CFunction` | **862 us** | 320 us |
 | Lua closure buffering, flush at 64 KiB | 1457 us | **156 us** |
 
-**Default (non-JIT): a raw `lua_CFunction`** via `Lua::create_c_function`, reading the string with
-`lua_tolstring` and appending to a thread-local sink. 19-23ns a call against mlua's 105-118,
-because it skips the upvalue lookup, `callback_error_ext`, the boxed closure and argument
-marshalling. 1.6x on heavy pages for no other change. It is `unsafe`: preallocate the sink per-VM
-at state creation so the write path never allocates and has no fallible branch, use
-`UnsafeCell<Vec<u8>>` rather than `RefCell` (whose `borrow_mut` is itself the panic), and keep the
-only allocation in the occasional flush where safe Rust and `try_reserve` apply. 
+The raw C function is 19-23ns a call against mlua's 105-118: it skips the upvalue lookup,
+`callback_error_ext`, the boxed closure and argument marshalling. That is what shipped, for both
+backends.
 
-**JIT backends: `_out` as a Lua closure** that appends to a table and flushes to the raw sink every
-N bytes. LuaJIT inlines it into the trace, so it beats even the 23ns call. Flush cost is negligible:
-156us at 64 KiB against 156 unflushed, and still 164 at 1 KiB.
+**The buffered Lua closure is rejected, despite the 156us.** It only wins on a page that is mostly
+literal HTML: every `<?lua= ?>` then costs a Rust callback *plus* a call back into Lua to reach the
+buffer, and on a 1000-row template that measured 1,442 rps against 2,820 for writing straight
+through. The 156us above was an escape-light fixture measuring the wrong thing -- the same error
+the LuaJIT verdict above came from. Do not revive it without a real template.
 
-*Not settled.* That holds for escape-light pages. On an escape-heavy one the buffer loses to a raw
-`_out` with fused escaping (568us vs 415us on LuaJIT), because the two cannot coexist -- see "Fuse
-escape-and-write" below. Decide against a real template.
-
-**The generated chunk does not change.** Both are just `_out(...)`; only its definition differs, so
-`template.rs` stays as is.
-
-Buffer size configurable. Subtract roughly **2x** the threshold from the effective Lua memory limit:
-the pending pieces are strings the template allocated anyway, but the table's array part is ~8 bytes
-per piece and the `table.concat` at flush allocates a new string of about the threshold size.
-
-"Flush" here means Lua buffer -> Rust `Vec`, **not** Rust -> socket, so this does not conflict with
-the streaming-responses design above. Needs the Lua backend to become a cargo feature of this crate.
+The generated chunk *does* now change: it opens with the local-binding prologue (see the Rust-side
+section above). Only `_out`'s definition is backend-independent.
 
 ### html_escape should be a raw C function too
 **Not done yet.** Unlike `_out` it returns a value, so it needs an allocation (which can only
