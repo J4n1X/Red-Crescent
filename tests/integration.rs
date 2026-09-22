@@ -750,3 +750,34 @@ async fn large_interleaved_output_survives_buffering() {
         &body[body.len().saturating_sub(40)..]
     );
 }
+
+/// Pins how every value type reaches the page through `<?lua= ?>`, which a raw
+/// C function renders: strings escaped, numbers formatted by Rust so the two
+/// backends agree, nil dropped, tables as JSON.
+#[actix_web::test]
+async fn out_expr_renders_every_value_type() {
+    let app = default_app().await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/out_expr_types.lhtml")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // LuaJIT has no integer subtype, so past 2^53 it only has the double.
+    let bigint = if cfg!(feature = "luajit") {
+        "9007199254740992"
+    } else {
+        "9007199254740993"
+    };
+    assert_eq!(
+        body_string(resp).await,
+        format!(
+            "nil:[]\ntrue:[true]\nfalse:[false]\nint:[42]\nfloat:[2.5]\nwhole:[5]\n\
+             neg:[-0.125]\nstr:[a&lt;b&gt;&amp;&#x27;&quot;c]\nmulti:[x1true]\n\
+             table:[[1,2]]\nfunc:[&lt;function&gt;]\nraw:[<b>]\nbigint:[{bigint}]\n"
+        )
+    );
+}
