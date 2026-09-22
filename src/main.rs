@@ -144,10 +144,11 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
-            .wrap(middleware::Logger::default())
+            .wrap(middleware::Condition::new(std::env::var_os("RC_EXP_NOLOG").is_none(), middleware::Logger::default()))
             .default_service(web::route().to(handler))
     })
     .workers(config.workers)
+    .worker_max_blocking_threads(std::env::var("RC_EXP_BLOCKING").ok().and_then(|v| v.parse().ok()).unwrap_or(512 / config.workers.max(1)))
     // Streamed bodies (static files, send_file) write headers and data
     // separately; without TCP_NODELAY the second write waits ~40ms for the
     // client's delayed ACK on every kept-alive connection.

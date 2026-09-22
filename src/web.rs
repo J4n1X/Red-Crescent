@@ -170,8 +170,11 @@ pub async fn handler(
     let render_cfg = Arc::clone(&data.render_cfg);
     let dev = data.config.dev;
 
-    let blocking_result =
-        web::block(move || render(&render_cfg, &abs, &display_name, &request_data)).await;
+    let blocking_result = if std::env::var_os("RC_EXP_INLINE").is_some() {
+        Ok::<_, actix_web::error::BlockingError>(render(&render_cfg, &abs, &display_name, &request_data))
+    } else {
+        web::block(move || render(&render_cfg, &abs, &display_name, &request_data)).await
+    };
 
     remove_spooled(spooled).await;
 
