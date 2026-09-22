@@ -1,16 +1,17 @@
 //! The Lua-facing API.
 //!
-//! `install_core` registers the request-independent surface (`html_escape`,
-//! `log`, `json`, `sqlite`, `crypto`, the `server` table, and the confined
-//! `package.path`) — it is shared by request rendering and background jobs.
-//! `install` adds the request-specific parts on top: output (`_out`,
-//! `_out_expr`, `print`), `include()`, `exit()`/`redirect()`, and the
-//! `request`/`response` tables.
+//! `install_core` is the request-independent surface, shared by rendering and
+//! background jobs; `install_request_api` adds output, `include`, `exit` and
+//! the environment builder.
+//!
+//! Both run once per state, because states are pooled. `build_request_env` is
+//! what runs per request: a *closed* environment holding copies of the library
+//! and API tables, which a sandbox chaining to `_G` cannot substitute for --
+//! see POOLING-PLAN.md.
 
 use std::cell::Cell;
 use std::os::raw::c_int;
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use std::time::Duration;
@@ -28,32 +29,52 @@ use crate::{crypto_api, sqlite_api};
 const MAX_INCLUDE_DEPTH: u32 = 16;
 
 thread_local! {
-    /// Output buffer of the request rendering on this thread, or null outside
-    /// a render. Only [`OutputScope`] ever sets it.
+    /// Separate from `CURRENT` so the raw `_out` reaches the buffer in one load.
     static CURRENT_OUT: Cell<*mut Vec<u8>> = const { Cell::new(std::ptr::null_mut()) };
+    /// The request rendering on this thread, or null outside a render.
+    static CURRENT: Cell<*const RenderState> = const { Cell::new(std::ptr::null()) };
 }
 
-/// Points the thread-local at `state`'s buffer for as long as this lives, and
-/// restores the previous value on drop — including while unwinding, so neither
-/// a panic nor a Lua error can leave a dangling pointer behind.
-pub(crate) struct OutputScope(*mut Vec<u8>);
+/// Points the thread-locals at `state` for as long as this lives; restored on
+/// drop, including while unwinding. This is what lets the API functions be
+/// built once per state instead of capturing the request.
+pub(crate) struct RequestScope {
+    out: *mut Vec<u8>,
+    state: *const RenderState,
+}
 
-impl OutputScope {
+impl RequestScope {
     pub(crate) fn new(state: &RenderState) -> Self {
-        OutputScope(CURRENT_OUT.replace(state.out.as_ptr()))
+        RequestScope {
+            out: CURRENT_OUT.replace(state.out.as_ptr()),
+            state: CURRENT.replace(state),
+        }
     }
 }
 
-impl Drop for OutputScope {
+impl Drop for RequestScope {
     fn drop(&mut self) {
-        let _ = CURRENT_OUT.try_with(|c| c.set(self.0));
+        let _ = CURRENT_OUT.try_with(|c| c.set(self.out));
+        let _ = CURRENT.try_with(|c| c.set(self.state));
     }
 }
 
-/// `_out`, as a bare `lua_CFunction` rather than an mlua callback: ~19ns a call
-/// against ~105ns, and generated chunks call it once per literal HTML segment,
-/// thousands of times on a large page.
-///
+/// Run `f` against the request being rendered on this thread. Null only on a
+/// background thread's state, which has no request.
+fn with_state<R>(f: impl FnOnce(&RenderState) -> mlua::Result<R>) -> mlua::Result<R> {
+    let ptr = CURRENT.try_with(|c| c.get()).unwrap_or(std::ptr::null());
+    if ptr.is_null() {
+        return Err(mlua::Error::runtime(
+            "this function is only available while a request is being rendered",
+        ));
+    }
+    // SAFETY: every caller is a Lua callback, and Lua only runs inside the
+    // span where `render` holds a `RequestScope`.
+    f(unsafe { &*ptr })
+}
+
+/// _out, using a raw C function rather than a Rust function improves callback
+/// speed drastically.
 /// # Safety
 /// Registered only via `create_c_function`, so Lua guarantees a valid state and
 /// at least one argument slot. It must never panic, because unwinding across
@@ -83,93 +104,37 @@ unsafe extern "C-unwind" fn lua_out(state: *mut mlua::lua_State) -> c_int {
     0
 }
 
-
-/// Where the output functions other than `_out` write.
-///
-/// On a non-JIT backend they append straight to the request buffer. On a JIT
-/// backend `_out` is a Lua closure accumulating into a Lua table, so everything
-/// else has to go through that same closure or output would interleave out of
-/// order. One type keeps the two paths from drifting.
+/// Where the output functions other than `_out` write: straight into the
+/// request buffer, the same place the raw `_out` appends to, so ordering holds
+/// without any coordination.
 #[derive(Clone)]
 pub(crate) enum Emitter {
-    Direct(Rc<RenderState>),
-    #[cfg(feature = "luajit")]
-    Buffered(mlua::Function),
+    Direct,
 }
 
 impl Emitter {
-    fn emit(&self, _lua: &Lua, bytes: &[u8]) -> mlua::Result<()> {
+    fn emit(&self, bytes: &[u8]) -> mlua::Result<()> {
         match self {
-            Emitter::Direct(st) => {
+            Emitter::Direct => with_state(|st| {
                 st.out.borrow_mut().extend_from_slice(bytes);
                 Ok(())
-            }
-            #[cfg(feature = "luajit")]
-            Emitter::Buffered(out) => out.call::<()>(_lua.create_string(bytes)?),
+            }),
         }
     }
 }
 
-/// Registry key holding the JIT backend's buffer flush, out of reach of
-/// template code.
-#[cfg(feature = "luajit")]
-pub(crate) const OUT_FLUSH_KEY: &str = "rc_out_flush";
-
-/// `_out` on a JIT backend: a Lua closure appending to a table and draining to
-/// the raw sink once it passes `limit` bytes. LuaJIT inlines it into the trace,
-/// which beats even a ~20ns C call; on a non-JIT backend the reverse is true,
-/// which is why the two differ. Returns the closure and its flush.
-#[cfg(feature = "luajit")]
-const BUFFERED_OUT: &str = r#"
-local sink, limit = ...
-local concat = table.concat
-local b, n, sz = {}, 0, 0
--- Bounded by pieces as well as bytes: a flood of one-byte writes would
--- otherwise hold one table slot each long before the byte limit is reached.
-local max_pieces = 8192
-local function out(s)
-    n = n + 1
-    b[n] = s
-    sz = sz + #s
-    if sz >= limit or n >= max_pieces then
-        sink(concat(b, "", 1, n))
-        n, sz = 0, 0
-    end
-end
-local function flush()
-    if n > 0 then
-        sink(concat(b, "", 1, n))
-        n, sz = 0, 0
-    end
-end
-return out, flush
-"#;
-
 /// Install `_out` and hand back the emitter the other output functions use.
-/// The JIT variant also leaves `_out_flush` in globals for `render` to call.
-fn install_out(lua: &Lua, state: &Rc<RenderState>, _cfg: &RenderConfig) -> mlua::Result<Emitter> {
+///
+/// A Lua-side buffer was tried on JIT backends and removed: it wins on a page
+/// of literal HTML, but every `<?lua= ?>` then costs a Rust callback *plus* a
+/// call back into Lua to reach the buffer. On a 1000-row template that measured
+/// 1,442 rps against 2,820 for writing straight through.
+fn install_out(lua: &Lua) -> mlua::Result<Emitter> {
     // SAFETY: see `lua_out`. Its buffer comes from the thread-local that
-    // `OutputScope` in `render` keeps pointed at this request's state.
+    // `RequestScope` in `render` keeps pointed at this request's state.
     let sink = unsafe { lua.create_c_function(lua_out)? };
-
-    #[cfg(not(feature = "luajit"))]
-    {
-        lua.globals().set("_out", sink)?;
-        Ok(Emitter::Direct(Rc::clone(state)))
-    }
-
-    #[cfg(feature = "luajit")]
-    {
-        let _ = state;
-        let setup = lua.load(BUFFERED_OUT).into_function()?;
-        let (out, flush): (mlua::Function, mlua::Function) =
-            setup.call((sink, _cfg.output_buffer_bytes))?;
-        lua.globals().set("_out", out.clone())?;
-        // Registry, not globals: a template that assigned over `_out_flush`
-        // would silently lose whatever was still buffered.
-        lua.set_named_registry_value(OUT_FLUSH_KEY, flush)?;
-        Ok(Emitter::Buffered(out))
-    }
+    lua.globals().set("_out", sink)?;
+    Ok(Emitter::Direct)
 }
 
 /// Request-independent API, shared by page rendering and background jobs.
@@ -369,17 +334,25 @@ pub(crate) fn install_core(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
         // Empty unless C-module directories were configured.
         package.set("cpath", cfg.c_module_path.as_deref().unwrap_or(""))?;
 
-        // Swap the stock Lua searcher for one that goes through the shared
-        // chunk cache. `package.loaded` starts empty in every state, so the
-        // stock one re-opens, re-reads and re-parses each module on every
-        // request. The C searcher beside it is left alone.
+        // Background threads only: requests get their own `require` from the
+        // environment builder, since `package.loaded` persists on a pooled
+        // state. Goes through the chunk cache either way.
         if let Ok(searchers) = package.get::<Table>("searchers") {
             let serve_dir = cfg.serve_dir.clone();
             let cache = Arc::clone(&cfg.cache);
             searchers.set(
                 2,
                 lua.create_function(move |lua, name: String| {
-                    search_lua_module(lua, &cache, &serve_dir, &name)
+                    // Stock protocol: loader + filename, or the paths tried.
+                    Ok(match find_module(&cache, &serve_dir, &name)? {
+                        Found::Chunk(chunk, abs) => (
+                            Value::Function(cache.chunk(lua, &chunk, None)?),
+                            Value::String(lua.create_string(abs.to_string_lossy().as_bytes())?),
+                        ),
+                        Found::Missing(tried) => {
+                            (Value::String(lua.create_string(&tried)?), Value::Nil)
+                        }
+                    })
                 })?,
             )?;
         }
@@ -388,22 +361,18 @@ pub(crate) fn install_core(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `package.searchers[2]`, replacing the stock Lua loader.
-///
-/// Keeps the stock contract: the same `?.lua` then `?/init.lua` order, dots in
-/// the module name becoming directory separators, a loader plus its filename on
-/// success, and a `no file '...'` line per path tried on failure, which
-/// `require` collects into its own "module not found" error. Resolution is
-/// canonicalized and checked against the serve directory, so a crafted name
-/// cannot reach outside it.
-fn search_lua_module(
-    lua: &Lua,
-    cache: &TemplateCache,
-    serve_dir: &Path,
-    name: &str,
-) -> mlua::Result<(Value, Value)> {
+enum Found {
+    Chunk(Arc<crate::template::CompiledChunk>, std::path::PathBuf),
+    /// A `no file '...'` line per path tried, as stock `require` reports.
+    Missing(String),
+}
+
+/// Resolve a module name like the stock searcher: `?.lua` then `?/init.lua`,
+/// dots becoming separators. Canonicalized and checked against the serve
+/// directory, so a crafted name cannot reach outside it.
+fn find_module(cache: &TemplateCache, serve_dir: &Path, name: &str) -> mlua::Result<Found> {
     let rel = name.replace('.', std::path::MAIN_SEPARATOR_STR);
-    let mut tried: Vec<String> = Vec::new();
+    let mut tried = String::new();
 
     for candidate in [format!("{rel}.lua"), format!("{rel}/init.lua")] {
         let joined = serve_dir.join(&candidate);
@@ -412,47 +381,177 @@ fn search_lua_module(
             .ok()
             .filter(|abs| abs.starts_with(serve_dir) && abs.is_file());
         let Some(abs) = resolved else {
-            tried.push(format!("\n\tno file '{}'", joined.display()));
+            tried.push_str(&format!("\n\tno file '{}'", joined.display()));
             continue;
         };
 
         let module = cache
             .load_module(&abs, &candidate)
             .map_err(|e| mlua::Error::runtime(format!("require '{name}': {e}")))?;
-        let loader = cache.chunk(lua, &module)?;
-        let path = lua.create_string(abs.to_string_lossy().as_bytes())?;
-        return Ok((Value::Function(loader), Value::String(path)));
+        return Ok(Found::Chunk(module, abs));
     }
 
-    let message = lua.create_string(tried.concat())?;
-    Ok((Value::String(message), Value::Nil))
+    Ok(Found::Missing(tried))
 }
 
-/// Full request-rendering API: everything from [`install_core`] plus output,
-/// control flow, include, and the request/response tables.
-pub(crate) fn install(
-    lua: &Lua,
-    state: &Rc<RenderState>,
-    cfg: &RenderConfig,
-    request: &RequestData,
-) -> mlua::Result<()> {
+/// Registry key holding the per-request environment builder, out of reach of
+/// template code.
+const ENV_BUILDER_KEY: &str = "rc_env_builder";
+
+/// Lua 5.2+ takes the environment as `load`'s fourth argument.
+#[cfg(not(feature = "luajit"))]
+const LOAD_SHIM: &str = r##"
+    env.load = function(chunk, chunkname, mode, ...)
+        if select("#", ...) > 0 then return rawload(chunk, chunkname, mode, ...) end
+        return rawload(chunk, chunkname, mode, env)
+    end
+"##;
+
+/// 5.1 has no environment parameter, so the chunk is rebound after loading.
+#[cfg(feature = "luajit")]
+const LOAD_SHIM: &str = r#"
+    local setfenv = setfenv
+    local function bind(f, err)
+        if f == nil then return f, err end
+        return setfenv(f, env)
+    end
+    env.load = function(chunk, chunkname, mode) return bind(rawload(chunk, chunkname, mode)) end
+    env.loadstring = env.load
+"#;
+
+/// Builds one request's environment. Compiled once per state; the function it
+/// returns is what runs per request.
+const ENV_BUILDER: &str = r#"
+local shared = ...
+
+local search, include = shared.search, shared.include
+local set_cookie, send_file = shared.set_cookie, shared.send_file
+local native_require = shared.native_require
+
+-- Copied per request. Copying is what makes a reused state safe: a sandbox
+-- chaining to _G would let one request's `string.upper = f` reach the next.
+local TABLES = {
+    "string", "table", "math", "os", "io", "coroutine", "utf8",
+    "log", "json", "sqlite", "crypto", "fs", "process", "thread", "server",
+}
+-- Shared by reference, since a Lua function value is immutable. Absent on
+-- purpose: getmetatable (getmetatable("").__index is the real string table,
+-- which no copy can hide), rawset (walks past the log table's read-only
+-- guard), dofile/loadfile (chunks bound to the real globals), and
+-- require/load, replaced below.
+local FUNCS = {
+    "assert", "collectgarbage", "error", "ipairs", "next", "pairs", "pcall",
+    "rawequal", "rawget", "rawlen", "select", "setmetatable", "tonumber",
+    "tostring", "type", "unpack", "xpcall",
+    "html_escape", "print", "exit", "redirect", "_out", "_out_expr", "_out_raw",
+}
+
+local next, select, error, tostring, rawload, type = next, select, error, tostring, load, type
+local G, VERSION = _G, _VERSION
+local pkg_path, pkg_cpath = package.path, package.cpath
+local pkg_config, loadlib = package.config, package.loadlib
+
+-- Resolved once per state. A name absent on this backend (utf8 on LuaJIT)
+-- drops out here rather than being tested per request.
+local tnames, tvals, tmodule, nt = {}, {}, {}, 0
+for i = 1, #TABLES do
+    local name = TABLES[i]
+    if type(G[name]) == "table" then
+        nt = nt + 1
+        tnames[nt], tvals[nt] = name, G[name]
+        -- Only what stock require already resolves stays require-able.
+        tmodule[nt] = package.loaded[name] ~= nil
+    end
+end
+local fnames, fvals, nf = {}, {}, 0
+for i = 1, #FUNCS do
+    local name = FUNCS[i]
+    if G[name] ~= nil then
+        nf = nf + 1
+        fnames[nf], fvals[nf] = name, G[name]
+    end
+end
+
+return function()
+    local env, loaded, preload, loading = {}, {}, {}, {}
+
+    for i = 1, nt do
+        local source, copy = tvals[i], {}
+        for k, v in next, source do copy[k] = v end
+        local name = tnames[i]
+        env[name] = copy
+        if tmodule[i] then loaded[name] = copy end
+    end
+    for i = 1, nf do env[fnames[i]] = fvals[i] end
+
+    env._G = env
+    env._VERSION = VERSION
+    loaded._G = env
+
+    -- `loaded` is this request's, so module state dies with it. `searchers`
+    -- is absent rather than copied: require below does not consult it.
+    env.package = {
+        path = pkg_path,
+        cpath = pkg_cpath,
+        config = pkg_config,
+        loaded = loaded,
+        preload = preload,
+        loadlib = loadlib,
+    }
+
+    --[[LOAD_SHIM]]
+
+    local function record(name, result)
+        if result == nil then result = true end
+        loaded[name], loading[name] = result, nil
+        return result
+    end
+
+    env.require = function(name)
+        local module = loaded[name]
+        if module ~= nil then return module end
+        if loading[name] then
+            error("loop or previous error loading module '" .. tostring(name) .. "'", 2)
+        end
+        loading[name] = true
+        local loader = preload[name]
+        if loader ~= nil then return record(name, loader(name, ":preload:")) end
+        local path
+        loader, path = search(name, env)
+        if loader ~= nil then return record(name, loader(name, path)) end
+        loading[name] = nil
+        -- Native modules only, and only with --c-module-dir, which pools nothing.
+        if native_require ~= nil then return native_require(name) end
+        error("module '" .. tostring(name) .. "' not found:" .. tostring(path), 2)
+    end
+
+    env.include = function(rel) return include(rel, env) end
+
+    env.response = {
+        status = 200,
+        headers = {},
+        set_cookie = set_cookie,
+        send_file = send_file,
+    }
+
+    return env
+end
+"#;
+
+/// Installed once when a state is built. Nothing here may capture a request --
+/// a pooled state serves many; see [`with_state`].
+pub(crate) fn install_request_api(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
     install_core(lua, cfg)?;
 
     let globals = lua.globals();
 
     // --- output ---------------------------------------------------------
-    // The buffer is raw bytes: Lua strings are byte strings, so binary
-    // output survives untouched.
 
-    // _out: internal, used by generated chunks for literal HTML segments.
-    // Backend-dependent; everything below writes through the emitter it hands
-    // back so that ordering holds on both.
-    let emitter = install_out(lua, state, cfg)?;
+    let emitter = install_out(lua)?;
 
-    // _out_expr: internal, used for <?lua= expr ?>. Escapes by default; nil
-    // prints nothing. Values are rendered to bytes *before* the buffer is
-    // touched, so a __tostring or __pairs metamethod that writes output cannot
-    // re-enter a live borrow.
+    // <?lua= expr ?>. Escapes by default; nil prints nothing. Values become
+    // bytes *before* the buffer is touched, so a __tostring that writes output
+    // cannot re-enter a live borrow.
     let em = emitter.clone();
     globals.set(
         "_out_expr",
@@ -463,17 +562,16 @@ pub(crate) fn install(
                 }
                 let bytes = value_to_bytes(lua, value)?;
                 if needs_escaping(&bytes) {
-                    em.emit(lua, &escape_bytes(&bytes))?;
+                    em.emit(&escape_bytes(&bytes))?;
                 } else {
-                    em.emit(lua, &bytes)?;
+                    em.emit(&bytes)?;
                 }
             }
             Ok(())
         })?,
     )?;
 
-    // _out_raw: internal, used for <?lua== expr ?>. Writes the value through
-    // unescaped, for templates deliberately emitting markup.
+    // <?lua== expr ?>: unescaped, for templates deliberately emitting markup.
     let em = emitter.clone();
     globals.set(
         "_out_raw",
@@ -483,14 +581,14 @@ pub(crate) fn install(
                     continue;
                 }
                 let bytes = value_to_bytes(lua, value)?;
-                em.emit(lua, &bytes)?;
+                em.emit(&bytes)?;
             }
             Ok(())
         })?,
     )?;
 
-    // print: writes to the page, joining arguments with a space. Unescaped:
-    // it is how a template emits markup it assembled itself.
+    // Joins arguments with a space. Unescaped: it is how a template emits
+    // markup it assembled itself.
     let em = emitter.clone();
     globals.set(
         "print",
@@ -499,10 +597,10 @@ pub(crate) fn install(
             for value in params {
                 let bytes = value_to_bytes(lua, value)?;
                 if !first {
-                    em.emit(lua, b" ")?;
+                    em.emit(b" ")?;
                 }
                 first = false;
-                em.emit(lua, &bytes)?;
+                em.emit(&bytes)?;
             }
             Ok(())
         })?,
@@ -519,7 +617,6 @@ pub(crate) fn install(
 
     // The redirect is mirrored into Rust-side state *before* raising the exit
     // signal, so even a template pcall around redirect() can't lose it.
-    let st = Rc::clone(state);
     globals.set(
         "redirect",
         lua.create_function(
@@ -530,72 +627,100 @@ pub(crate) fn install(
                         "redirect: status must be a 3xx code, got {status}"
                     )));
                 }
-                *st.redirect.borrow_mut() = Some((url, status));
+                with_state(|st| {
+                    *st.redirect.borrow_mut() = Some((url, status));
+                    Ok(())
+                })?;
                 Err(mlua::Error::external(ExitSignal))
             },
         )?,
     )?;
 
-    // --- include --------------------------------------------------------
+    // --- the values the environment builder closes over ------------------
+    //
+    // Only the callbacks: the builder reads the library and API tables from
+    // its own globals, which is one table constructor instead of forty
+    // crossings on every state a non-pooled server builds.
 
-    let st = Rc::clone(state);
+    let shared = lua.create_table()?;
+
+    // Native modules cannot go through the chunk cache, so they fall back to
+    // Lua's own require. Only with --c-module-dir, which also turns pooling off.
+    if cfg.c_module_path.is_some() {
+        shared.set("native_require", globals.get::<Value>("require")?)?;
+    }
+
+    // --- require ---------------------------------------------------------
+
     let serve_dir = cfg.serve_dir.clone();
     let cache = Arc::clone(&cfg.cache);
-    globals.set(
-        "include",
-        lua.create_function(move |lua, rel: String| {
-            if st.include_depth.get() >= MAX_INCLUDE_DEPTH {
-                return Err(mlua::Error::runtime(format!(
-                    "include: depth limit ({MAX_INCLUDE_DEPTH}) exceeded — recursive include?"
-                )));
-            }
-            let joined = serve_dir.join(rel.trim_start_matches('/'));
-            let abs = joined
-                .canonicalize()
-                .map_err(|_| mlua::Error::runtime(format!("include: file not found: {rel}")))?;
-            if !abs.starts_with(&serve_dir) {
-                return Err(mlua::Error::runtime(format!(
-                    "include: path escapes the serve directory: {rel}"
-                )));
-            }
-            if !abs
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("lhtml"))
-            {
-                return Err(mlua::Error::runtime(
-                    "include: only .lhtml files can be included (use require() for .lua modules)",
-                ));
-            }
-
-            let display_name = abs
-                .strip_prefix(&serve_dir)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| rel.clone());
-            let template = cache
-                .load(&abs, &display_name)
-                .map_err(|e| mlua::Error::runtime(format!("include: {e}")))?;
-
-            let func = cache.chunk(lua, &template)?;
-
-            st.include_depth.set(st.include_depth.get() + 1);
-            let result = func.call::<()>(());
-            st.include_depth.set(st.include_depth.get() - 1);
-            result
+    shared.set(
+        "search",
+        lua.create_function(move |lua, (name, env): (String, Table)| {
+            // Bound to the requesting environment, so module globals are
+            // that request's and die with it.
+            Ok(match find_module(&cache, &serve_dir, &name)? {
+                Found::Chunk(module, abs) => (
+                    Value::Function(cache.chunk_for(lua, &module, &env)?),
+                    Value::String(lua.create_string(abs.to_string_lossy().as_bytes())?),
+                ),
+                Found::Missing(tried) => (Value::Nil, Value::String(lua.create_string(&tried)?)),
+            })
         })?,
     )?;
 
-    // --- request table --------------------------------------------------
+    // --- include --------------------------------------------------------
 
-    globals.set("request", build_request_table(lua, request)?)?;
+    let serve_dir = cfg.serve_dir.clone();
+    let cache = Arc::clone(&cfg.cache);
+    shared.set(
+        "include",
+        lua.create_function(move |lua, (rel, env): (String, Table)| {
+            with_state(|st| {
+                if st.include_depth.get() >= MAX_INCLUDE_DEPTH {
+                    return Err(mlua::Error::runtime(format!(
+                        "include: depth limit ({MAX_INCLUDE_DEPTH}) exceeded — recursive include?"
+                    )));
+                }
+                let joined = serve_dir.join(rel.trim_start_matches('/'));
+                let abs = joined
+                    .canonicalize()
+                    .map_err(|_| mlua::Error::runtime(format!("include: file not found: {rel}")))?;
+                if !abs.starts_with(&serve_dir) {
+                    return Err(mlua::Error::runtime(format!(
+                        "include: path escapes the serve directory: {rel}"
+                    )));
+                }
+                if !abs
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("lhtml"))
+                {
+                    return Err(mlua::Error::runtime(
+                        "include: only .lhtml files can be included (use require() for .lua modules)",
+                    ));
+                }
 
-    // --- response table -------------------------------------------------
+                let display_name = abs
+                    .strip_prefix(&serve_dir)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| rel.clone());
+                let template = cache
+                    .load(&abs, &display_name)
+                    .map_err(|e| mlua::Error::runtime(format!("include: {e}")))?;
 
-    let response = lua.create_table()?;
-    response.set("status", 200)?;
-    response.set("headers", lua.create_table()?)?;
+                let func = cache.chunk_for(lua, &template, &env)?;
 
-    let st = Rc::clone(state);
-    response.set(
+                st.include_depth.set(st.include_depth.get() + 1);
+                let result = func.call::<()>(());
+                st.include_depth.set(st.include_depth.get() - 1);
+                result
+            })
+        })?,
+    )?;
+
+    // --- response helpers ------------------------------------------------
+
+    shared.set(
         "set_cookie",
         lua.create_function(move |_, spec: Table| {
             let cookie = LuaCookie {
@@ -619,18 +744,19 @@ pub(crate) fn install(
                     "set_cookie: same_site must be 'strict', 'lax' or 'none', got '{ss}'"
                 )));
             }
-            st.cookies.borrow_mut().push(cookie);
-            Ok(())
+            with_state(|st| {
+                st.cookies.borrow_mut().push(cookie);
+                Ok(())
+            })
         })?,
     )?;
 
     // send_file: serve a file from the data or serve directory instead of
     // the rendered output. The async side handles the actual delivery
     // (ranges, ETag, Content-Disposition).
-    let st = Rc::clone(state);
     let data_dir = cfg.data_dir.clone();
     let serve_dir = cfg.serve_dir.clone();
-    response.set(
+    shared.set(
         "send_file",
         lua.create_function(move |_, (path, opts): (String, Option<Table>)| {
             let abs = std::path::Path::new(&path)
@@ -683,18 +809,99 @@ pub(crate) fn install(
                 Some(o) => (o.get("download_name")?, o.get("content_type")?),
                 None => (None, None),
             };
-            *st.send_file.borrow_mut() = Some(SendFileSpec {
-                path: abs,
-                download_name,
-                content_type,
-            });
-            Ok(())
+            with_state(|st| {
+                *st.send_file.borrow_mut() = Some(SendFileSpec {
+                    path: abs,
+                    download_name,
+                    content_type,
+                });
+                Ok(())
+            })
         })?,
     )?;
 
-    globals.set("response", response)?;
+    let builder: mlua::Function = env_builder_factory(lua)?.call(shared)?;
+    lua.set_named_registry_value(ENV_BUILDER_KEY, builder)?;
 
     Ok(())
+}
+
+/// The chunk that builds the builder, from bytecode after the first state
+/// compiles it. Without this a non-pooled server reparses it every request,
+/// which measured 1.7x on `hello`.
+fn env_builder_factory(lua: &Lua) -> mlua::Result<mlua::Function> {
+    static DUMPED: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    if let Some(code) = DUMPED.get() {
+        return lua.load(code.as_slice()).into_function();
+    }
+    let function = lua
+        .load(ENV_BUILDER.replace("--[[LOAD_SHIM]]", LOAD_SHIM))
+        .set_name("=rc:env")
+        .into_function()?;
+    let _ = DUMPED.set(function.dump(false));
+    Ok(function)
+}
+
+/// This request's closed environment.
+///
+/// One deliberate difference from stock Lua: `string.upper = f` changes
+/// `string.upper(...)` but not `("x"):upper()`, because the string metatable
+/// still points at the untouched original.
+pub(crate) fn build_request_env(lua: &Lua, request: &RequestData) -> mlua::Result<Table> {
+    let builder: mlua::Function = lua.named_registry_value(ENV_BUILDER_KEY)?;
+    let env: Table = builder.call(())?;
+    env.set("request", build_request_table(lua, request)?)?;
+    Ok(env)
+}
+
+/// Whether the calling hook should abort this request. The watchdog owns the
+/// clock, so this is one atomic load -- no `Instant::now()` on the hot path.
+/// It stays true once set, so a script-level pcall can delay the abort by at
+/// most one hook interval rather than swallowing it.
+pub(crate) fn should_abort() -> bool {
+    crate::watchdog::should_abort()
+}
+
+thread_local! {
+    static CAPTURED_STATE: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Hands the running `lua_State` out to Rust. Calling a raw C function is the
+/// only place mlua surfaces the pointer.
+unsafe extern "C-unwind" fn capture_state(state: *mut mlua::lua_State) -> c_int {
+    let _ = CAPTURED_STATE.try_with(|c| c.set(state as usize));
+    0
+}
+
+/// Address of `lua`'s state, which the watchdog needs to interrupt a JIT
+/// backend. An address rather than a pointer so it can cross threads.
+pub(crate) fn state_address(lua: &Lua) -> mlua::Result<usize> {
+    // SAFETY: `capture_state` only stores its argument; it cannot panic and
+    // raises nothing.
+    let capture = unsafe { lua.create_c_function(capture_state)? };
+    capture.call::<()>(())?;
+    Ok(CAPTURED_STATE.try_with(|c| c.get()).unwrap_or(0))
+}
+
+/// Armed by the watchdog's signal handler; no hook is installed otherwise.
+/// Consults the slot before raising, so an arming that raced a finished
+/// request is a no-op rather than a killed innocent.
+///
+/// # Safety
+/// A `lua_Hook`, so it must not panic and must leave no Rust value with a
+/// `Drop` impl live across the raise: `lua_error` longjmps.
+pub(crate) unsafe extern "C-unwind" fn timeout_hook(
+    state: *mut mlua::lua_State,
+    _ar: *mut mlua::ffi::lua_Debug,
+) {
+    unsafe { mlua::ffi::lua_sethook(state, None, 0, 0) };
+    if !should_abort() {
+        return;
+    }
+    unsafe {
+        mlua::ffi::lua_pushliteral(state, c"execution time limit exceeded");
+        mlua::ffi::lua_error(state);
+    }
 }
 
 fn build_request_table(lua: &Lua, request: &RequestData) -> mlua::Result<Table> {
@@ -813,8 +1020,7 @@ fn build_request_table(lua: &Lua, request: &RequestData) -> mlua::Result<Table> 
     Ok(table)
 }
 
-/// Bytes needing replacement. Lua strings are byte strings, and every escaped
-/// character is ASCII, so this works bytewise without decoding UTF-8.
+/// Bytewise: every escaped character is ASCII, so UTF-8 needs no decoding.
 #[inline]
 fn needs_escaping(bytes: &[u8]) -> bool {
     bytes
@@ -845,10 +1051,7 @@ pub fn html_escape(input: &str) -> String {
     String::from_utf8(escape_bytes(input.as_bytes())).expect("escaping preserves UTF-8")
 }
 
-/// Append a value to the output buffer: strings pass through as raw bytes,
-/// everything else is stringified like `value_to_string`.
-/// Render a value to output bytes. Lua strings pass through as raw bytes so
-/// binary output survives; everything else goes via `value_to_string`.
+/// Lua strings pass through as raw bytes so binary output survives.
 fn value_to_bytes(lua: &Lua, value: Value) -> mlua::Result<Vec<u8>> {
     Ok(match value {
         Value::String(s) => s.as_bytes().to_vec(),

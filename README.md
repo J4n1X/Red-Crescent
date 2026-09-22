@@ -14,7 +14,7 @@ Its intended purpose is to be used behind another webserver such as Nginx or Apa
 - **🧵 Background threads**: `thread.spawn("worker", "jobs/worker.lua", args)` — a long-lived Lua instance on its own OS thread, with arguments in, a return value out, and `thread.join()` to wait on it
 - **🧩 Includes & modules**: `include("partials/nav.lhtml")` for partials, `require("utils")` for `.lua` modules
 - **🛡️ Guard rails**: Per-request execution timeout and memory limit, so a buggy template can't take down a worker
-- **🚀 Non-blocking**: Lua runs on blocking threads with a fresh, isolated instance per request; slow templates don't stall other requests
+- **🚀 Non-blocking**: Lua runs on blocking threads, each request isolated in its own environment; slow templates don't stall other requests
 - **📁 Static files**: CSS/JS/images served alongside templates (`.lua` sources and dotfiles are never served)
 - **📝 Server logging**: `log.info()`, `log.debug()`, etc. from Lua
 
@@ -86,7 +86,6 @@ All options as flags and environment variables (`--help` for the full list):
 | `--timeout-ms` | `RC_TIMEOUT_MS` | `5000` | Lua execution time limit per request |
 | `--memory-limit-mb` | `RC_MEMORY_LIMIT_MB` | `64` | Lua memory limit per request |
 | `--max-body-size` | `RC_MAX_BODY_SIZE` | `1048576` | Non-multipart body cap in bytes (413 beyond) |
-| `--output-buffer-bytes` | `RC_OUTPUT_BUFFER_BYTES` | `65536` | Page output held in Lua before draining; JIT builds only, ignored otherwise |
 | `--data-dir` | `RC_DATA_DIR` | `./data` | Writable sandbox for sqlite/uploads/send_file (must not be inside the serve dir) |
 | `--max-upload-size` | `RC_MAX_UPLOAD_SIZE` | `268435456` | Total multipart upload cap in bytes |
 | `--max-upload-files` | `RC_MAX_UPLOAD_FILES` | `256` | Max file parts per multipart request |
@@ -95,6 +94,8 @@ All options as flags and environment variables (`--help` for the full list):
 | `--thread-memory-limit-mb` | `RC_THREAD_MEMORY_LIMIT_MB` | `256` | Lua memory limit for a background thread instance |
 | `--sqlite-idle-connections` | `RC_SQLITE_IDLE_CONNECTIONS` | `2` | Warm SQLite connections kept per database, per worker thread; `0` disables reuse |
 | `--c-module-dir` | `RC_C_MODULE_DIRS` | — | Directory of native `.so` Lua modules `require` may load, repeatable (off by default; needs a `--features c-modules` build) |
+| `--lua-pool` | `RC_LUA_POOL` | `true` | Reuse Lua states between requests; forced off when C modules are enabled |
+| `--lua-pool-max-requests` | `RC_LUA_POOL_MAX_REQUESTS` | `10000` | Requests one pooled state serves before it is retired |
 | `--static-files` | `RC_STATIC_FILES` | `true` | Serve non-`.lhtml` files |
 | `--index` | `RC_INDEX` | `index.lhtml` | File served for `/` and directories |
 | `--fallback` | `RC_FALLBACK` | — | Template rendered when a path resolves to no file (front controller) |
@@ -256,6 +257,24 @@ local utils = require("utils")    -- loads <serve-dir>/utils.lua
 ```
 
 Both are confined to the serve directory. Includes are capped at depth 16; `.lua` files can be `require`d but are never served over HTTP. Native `.so` modules are refused unless C modules are explicitly enabled — see [Native C modules](#native-c-modules).
+
+**Modules are re-executed for every request**, and `package.loaded` is per-request, so a module's
+top-level state lasts exactly one request. Use a database or a background thread for anything that
+has to outlive one. The file itself is read and parsed once per process, not once per request.
+
+### Environment differences from stock Lua
+
+Each request runs in a closed environment rather than against shared globals (see
+[Security Model](#security-model)), which shows in four places:
+
+- `string.upper = f` changes `string.upper(...)` for the rest of that request but **not**
+  `("x"):upper()`, because the string metatable still points at the untouched original.
+- `getmetatable`, `rawset`, `dofile` and `loadfile` are not in scope. Each is a route back to the
+  shared tables or the real globals; `setmetatable`, `rawget`, `rawequal` and `rawlen` are.
+- `load(chunk)` defaults the chunk's environment to the request's, not to `_G`. Passing a fourth
+  argument explicitly still wins.
+- `package` carries `path`, `cpath`, `config`, `loaded`, `preload` and `loadlib`. `searchers` is
+  absent because request `require` does not consult it.
 
 ### SQLite
 
@@ -440,15 +459,17 @@ bind of `127.0.0.1` is deliberate, so an unconfigured server is not exposed by a
 
 Templates are **trusted code**, exactly like PHP files: they run with the full Lua standard library, including `os.execute` and `io`. Only deploy templates you wrote. What the server does protect against:
 
-- **Runaway templates**: an execution timeout aborts infinite loops (a template-level `pcall` can't suppress it) and a memory limit stops runaway allocation. Caveat: the timeout can't interrupt a blocking C call such as a hung `os.execute`.
+- **Runaway templates**: an execution timeout aborts infinite loops (a template-level `pcall` can't suppress it) and a memory limit stops runaway allocation. A watchdog thread owns the clock; nothing is installed in the VM until a deadline passes, so the guard costs nothing while a request is inside its budget. Caveat: it can't interrupt a blocking C call such as a hung `os.execute`.
 - **Path traversal**: every path is canonicalized and must remain inside the serve directory (encoded `../` included). `sqlite.open` and `response.send_file` are likewise confined to the data (and serve) directories.
 - **Source disclosure**: `.lua` files and dotfiles under the serve directory are never sent to a client — not as static files, and not through `response.send_file` either, so an app that passes a user-controlled path to it cannot be tricked into handing out its own modules or `rc_config.lua`. Symlinks don't help an attacker: paths are canonicalized before the check. The data directory is exempt from the source rule (a `.lua` file there is user content), and the server refuses to start with the data directory inside the serve directory.
 - **Error leakage**: without `--dev`, error pages carry no details; specifics go to the server log only.
-- **Request isolation**: each request runs in a fresh Lua instance — no state can leak between
-  requests, *unless native C modules are enabled* (below). `dlopen` caches a library per
-  process rather than per Lua state, so whatever a C module keeps in its own globals is shared
-  by every request and every background thread. With C modules off — the default — the
-  guarantee is unconditional.
+- **Request isolation**: each request runs in its own closed environment holding private copies
+  of every library and API table, so nothing it writes — a global, `string.upper`, a module's
+  table — can reach another request. Lua states are reused between requests (`--lua-pool`), and
+  the environment, not the state's lifetime, is what isolates them. *Native C modules are the
+  exception* (below): `dlopen` caches a library per process, so whatever one keeps in its own
+  globals is shared by every request and every background thread. Enabling them therefore also
+  turns pooling off. With C modules off — the default — the guarantee is unconditional.
 
 ### Native C modules
 
@@ -508,6 +529,9 @@ load only modules you would trust with the whole process.
 - Lua executes on blocking threads (`web::block`), so async workers keep serving other requests while a template runs.
 - Templates are compiled once and cached (keyed by mtime + size); disabled in `--dev`.
 - Output goes through a Rust-side buffer — no quadratic string concatenation.
+- Lua states are pooled per thread, which removes ~265 µs of setup per request: on the reference
+  box a small page measured 8,554 rps with `--lua-pool false` against 26,188 with pooling on.
+  Building a state per request stays available for C-module deployments and as an escape hatch.
 
 ## Development
 

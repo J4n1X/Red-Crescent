@@ -7,6 +7,7 @@ pub mod runtime;
 pub mod sqlite_api;
 pub mod template;
 pub mod threads;
+pub(crate) mod watchdog;
 pub mod web;
 
 use std::path::{Path, PathBuf};

@@ -5,7 +5,7 @@ use actix_web::{App, HttpServer, middleware, web};
 use clap::Parser;
 
 use red_crescent::config::{Config, Settings, load_file_config};
-use red_crescent::runtime::{Limits, RenderConfig, ThreadLimits};
+use red_crescent::runtime::{ConfigId, Limits, RenderConfig, ThreadLimits};
 use red_crescent::template::TemplateCache;
 use red_crescent::threads::{self, ThreadRegistry};
 use red_crescent::web::{AppState, handler};
@@ -82,6 +82,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     let render_cfg = Arc::new(RenderConfig {
+        id: ConfigId::new(),
         serve_dir: serve_dir.clone(),
         data_dir: data_dir.clone(),
         cache: Arc::new(TemplateCache::new(!config.dev)),
@@ -90,7 +91,6 @@ async fn main() -> std::io::Result<()> {
             memory_bytes: config.memory_limit_mb * 1024 * 1024,
         },
         max_body_size: config.max_body_size,
-        output_buffer_bytes: config.output_buffer_bytes,
         max_upload_size: config.max_upload_size,
         max_upload_files: config.max_upload_files,
         threads: Arc::new(ThreadRegistry::new()),
@@ -104,6 +104,8 @@ async fn main() -> std::io::Result<()> {
             memory_bytes: config.thread_memory_limit_mb * 1024 * 1024,
         },
         c_module_path: c_module_path.map(Arc::from),
+        pool: config.lua_pool,
+        pool_max_requests: config.lua_pool_max_requests,
     });
 
     // Boot-time background threads: validate every script first (fail fast),

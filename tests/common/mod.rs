@@ -9,7 +9,7 @@ use actix_web::dev::{Service, ServiceResponse};
 use actix_web::{App, test, web};
 
 use red_crescent::config::Config;
-use red_crescent::runtime::{Limits, RenderConfig, ThreadLimits};
+use red_crescent::runtime::{ConfigId, Limits, RenderConfig, ThreadLimits};
 use red_crescent::template::TemplateCache;
 use red_crescent::threads::ThreadRegistry;
 use red_crescent::web::{AppState, handler};
@@ -31,7 +31,6 @@ pub fn test_config(serve_dir: &str) -> Config {
         timeout_ms: 400,
         memory_limit_mb: 8,
         max_body_size: 4096,
-        output_buffer_bytes: 8192,
         data_dir: unique_data_dir(),
         max_upload_size: 64 * 1024,
         max_upload_files: 8,
@@ -46,6 +45,8 @@ pub fn test_config(serve_dir: &str) -> Config {
         fallback: None,
         dev: false,
         c_module_dirs: Vec::new(),
+        lua_pool: true,
+        lua_pool_max_requests: red_crescent::config::DEFAULT_LUA_POOL_MAX_REQUESTS,
     }
 }
 
@@ -63,6 +64,7 @@ pub async fn app_with(
         red_crescent::setup_data_dir(&config.data_dir, &serve_dir).expect("data dir setup");
 
     let render_cfg = Arc::new(RenderConfig {
+        id: ConfigId::new(),
         serve_dir: serve_dir.clone(),
         data_dir: data_dir.clone(),
         cache: Arc::new(TemplateCache::new(!config.dev)),
@@ -71,7 +73,6 @@ pub async fn app_with(
             memory_bytes: config.memory_limit_mb * 1024 * 1024,
         },
         max_body_size: config.max_body_size,
-        output_buffer_bytes: config.output_buffer_bytes,
         max_upload_size: config.max_upload_size,
         max_upload_files: config.max_upload_files,
         threads: Arc::new(ThreadRegistry::new()),
@@ -86,6 +87,8 @@ pub async fn app_with(
         c_module_path: red_crescent::resolve_c_module_dirs(&config.c_module_dirs, &serve_dir)
             .expect("c module directories")
             .map(Arc::from),
+        pool: config.lua_pool,
+        pool_max_requests: config.lua_pool_max_requests,
     });
 
     let fallback = red_crescent::resolve_fallback(config.fallback.as_deref(), &serve_dir)

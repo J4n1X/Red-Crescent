@@ -744,5 +744,9 @@ async fn large_interleaved_output_survives_buffering() {
         body.len(),
         &body[..body.len().min(80)]
     );
-    assert!(body.trim_end().ends_with("END"), "tail lost: {:?}", &body[body.len().saturating_sub(40)..]);
+    assert!(
+        body.trim_end().ends_with("END"),
+        "tail lost: {:?}",
+        &body[body.len().saturating_sub(40)..]
+    );
 }

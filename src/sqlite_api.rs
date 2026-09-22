@@ -118,7 +118,11 @@ fn checkin(path: &Path, conn: Connection, limit: usize) {
     if conn.execute_batch("PRAGMA foreign_keys = OFF").is_err() {
         return;
     }
-    IDLE.with(|idle| {
+    // `try_with`, not `with`: a pooled Lua state is dropped by its own
+    // thread-local destructor, and if this one went first, `with` would panic
+    // inside a destructor and abort the process. Dropping the connection is
+    // the right answer at that point anyway.
+    let _ = IDLE.try_with(|idle| {
         let mut idle = idle.borrow_mut();
         let conns = idle.entry(path.to_path_buf()).or_default();
         if conns.len() < limit {

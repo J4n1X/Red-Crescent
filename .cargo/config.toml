@@ -1,0 +1,14 @@
+# LuaJIT compiles hot loops into traces that never consult the instruction
+# hook, which leaves `--timeout-ms` unenforceable: measured 0 hook fires on a
+# JIT-compiled loop (see TODO.md). `LUAJIT_ENABLE_CHECKHOOK` makes a trace load
+# `hookmask` and exit to the interpreter when the watchdog arms one. LuaJIT
+# ships it off by default; it measured free on a 1000-row page and +9% on the
+# tightest table-store loop tried.
+#
+# It has to arrive as CFLAGS because luajit-src sets XCFLAGS itself and offers
+# no pass-through. `force` is deliberate: without the flag the execution
+# timeout silently degrades to unbounded latency, so a stray CFLAGS in the
+# environment must not be able to disable it. The define is meaningless to the
+# other C dependencies, which ignore it.
+[env]
+CFLAGS = { value = "-DLUAJIT_ENABLE_CHECKHOOK", force = true }
