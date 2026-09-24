@@ -45,6 +45,12 @@ tempfile = "3"
 
 [dev-dependencies]
 actix-http = "3"
+
+# Unix-only: pprof's unwinder is POSIX, and a dev-dependency is pulled in by any
+# example, so an unconditional one makes every example uncompilable for Windows.
+# `profile_render` therefore builds on unix only; `bench_render` is the portable
+# one and needs no dev-dependency at all.
+[target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["flamegraph"] }
 
 [profile.release-compact]

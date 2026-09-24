@@ -1,5 +1,6 @@
 mod common;
 
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -675,6 +676,7 @@ async fn cached_modules_load_identically_on_every_request() {
 /// A symlink inside the serve directory pointing out of it must not be loadable
 /// as a module. The stock searcher would follow it; this one canonicalizes and
 /// checks the result, the same rule `include()` applies.
+#[cfg(unix)]
 #[actix_web::test]
 async fn require_refuses_a_module_symlinked_out_of_the_serve_dir() {
     let outside = tempfile::tempdir().unwrap();
@@ -826,6 +828,7 @@ async fn out_expr_renders_every_value_type() {
     );
 }
 
+#[cfg(unix)]
 async fn status_and_body<S>(app: &S, uri: &str) -> (StatusCode, String)
 where
     S: Service<actix_http::Request, Response = ServiceResponse, Error = actix_web::Error>,
@@ -836,6 +839,7 @@ where
 
 /// A serve directory with symlinks inside and out of it, and the directory
 /// the outward ones point at.
+#[cfg(unix)]
 fn symlinked_site() -> (tempfile::TempDir, tempfile::TempDir) {
     let outside = tempfile::tempdir().unwrap();
     for name in ["secret.txt", "page.lhtml", "index.lhtml"] {
@@ -861,6 +865,7 @@ fn symlinked_site() -> (tempfile::TempDir, tempfile::TempDir) {
     (serve, outside)
 }
 
+#[cfg(unix)]
 #[actix_web::test]
 async fn request_paths_cannot_follow_a_symlink_out_of_the_serve_dir() {
     let (serve, _outside) = symlinked_site();
@@ -881,6 +886,7 @@ async fn request_paths_cannot_follow_a_symlink_out_of_the_serve_dir() {
     }
 }
 
+#[cfg(unix)]
 #[actix_web::test]
 async fn symlinks_inside_the_serve_dir_resolve_to_their_target() {
     let (serve, _outside) = symlinked_site();
@@ -904,6 +910,7 @@ async fn symlinks_inside_the_serve_dir_resolve_to_their_target() {
     }
 }
 
+#[cfg(unix)]
 #[actix_web::test]
 async fn hidden_files_are_never_served() {
     let (serve, _outside) = symlinked_site();
@@ -919,6 +926,7 @@ async fn hidden_files_are_never_served() {
     }
 }
 
+#[cfg(unix)]
 #[actix_web::test]
 async fn directories_serve_their_index_and_nothing_else() {
     let (serve, _outside) = symlinked_site();
@@ -939,6 +947,7 @@ async fn directories_serve_their_index_and_nothing_else() {
 
 /// Nothing about resolution is cached: a file that appears, vanishes, or
 /// turns into a symlink out of the serve directory is seen on the next request.
+#[cfg(unix)]
 #[actix_web::test]
 async fn resolution_follows_changes_on_disk() {
     let (serve, outside) = symlinked_site();
@@ -977,6 +986,7 @@ async fn resolution_follows_changes_on_disk() {
     );
 }
 
+#[cfg(unix)]
 #[actix_web::test]
 async fn include_cannot_follow_a_symlink_out_of_the_serve_dir() {
     let (serve, _outside) = symlinked_site();

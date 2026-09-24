@@ -3,7 +3,8 @@
 //! prints the heaviest leaf frames. `NOPROF=1` times without sampling.
 //!
 //! pprof's unwinder aborts on LuaJIT's generated code, so the flamegraph is
-//! lua54-only; `NOPROF=1` works on both.
+//! lua54-only; `NOPROF=1` works on both. Unix only, like pprof.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,6 +54,12 @@ fn request(query: &str) -> RequestData {
     }
 }
 
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("profile_render needs pprof, which is unix-only; use bench_render");
+}
+
+#[cfg(unix)]
 fn main() {
     let rows = std::env::args().nth(1).unwrap_or_else(|| "1000".into());
     let iters: u32 = std::env::args()

@@ -1157,6 +1157,7 @@ pub(crate) fn reset_request_env(lua: &Lua) -> mlua::Result<()> {
 /// clock, so this is one atomic load -- no `Instant::now()` on the hot path.
 /// It stays true once set, so a script-level pcall can delay the abort by at
 /// most one hook interval rather than swallowing it.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn should_abort() -> bool {
     crate::watchdog::should_abort()
 }
@@ -1189,6 +1190,7 @@ pub(crate) fn state_address(lua: &Lua) -> mlua::Result<usize> {
 /// # Safety
 /// A `lua_Hook`, so it must not panic and must leave no Rust value with a
 /// `Drop` impl live across the raise: `lua_error` longjmps.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) unsafe extern "C-unwind" fn timeout_hook(
     state: *mut mlua::lua_State,
     _ar: *mut mlua::ffi::lua_Debug,
