@@ -13,6 +13,9 @@
         or (request.query.folder and request.query.folder ~= "")
 
     local kind, target, shares
+    -- Where "back to files" returns to. Empty means the root listing, which is
+    -- right for the overview and for an item that already sits at the top.
+    local folder_param = ""
     if has_target then
         if request.query.folder and request.query.folder ~= "" then
             kind, target = "folder", filesm.get_folder(db, user, request.query.folder)
@@ -23,6 +26,8 @@
             redirect("/?err=" .. util.urlencode("That item no longer exists."))
         end
         shares = sharesm.for_target(db, user, kind, target)
+        local parent = kind == "folder" and target.parent_id or target.folder_id
+        folder_param = parent and tostring(parent) or ""
     else
         shares = sharesm.all_for_user(db, user)
     end
@@ -100,7 +105,7 @@
         <?lua= util.human_size(target.size) ?>
         · <a href="/download.lhtml?id=<?lua= target.id ?>">download</a>
     <?lua end ?>
-    · <a href="/">back to files</a>
+    · <a href="/?folder=<?lua= folder_param ?>">back to files</a>
 </p>
 
 <div class="panel">
