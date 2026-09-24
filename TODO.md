@@ -132,6 +132,37 @@ So luajit is 1.44x lua54 on the 1000-row page and 1.52x at 5000, and ~3% behind 
 responses where the cost is per-request Rust setup rather than Lua. The PHP gap on heavy pages
 went from the 3.29x in BENCHMARKS.md to **1.74x**.
 
+**But do not put Drive on LuaJIT.** Measured 2026-09-22 against the real app, same database, both
+backends serving byte-identical HTML, `oha -c 8`:
+
+| Drive page | lua54 | luajit |
+| --- | --- | --- |
+| listing, 60 entries | **1737 rps** | 1468 rps |
+| login | **3866 rps** | 3706 rps |
+| shares | **3377 rps** | 3176 rps |
+
+lua54 wins every page, by 1.19x on the listing. The synthetic fixtures above are pure text
+generation in one long loop, which is what a JIT is for; Drive's pages are SQLite queries feeding
+short, varied template paths, where trace recording never pays for itself. This is the same
+mistake in the other direction as the earlier "LuaJIT is not faster" verdict -- **the fixture
+decides the answer, so measure the app you actually ship.** `deploy/stage.sh` builds lua54 and
+refuses to stage a JIT binary.
+
+**What the pending deploy buys Drive.** The live binary predates bytecode caching, the output
+work, pooling and the raw C functions. Old stack (Sep-14 binary with its matching templates)
+against current, same database, byte-identical HTML from both:
+
+| Drive page | deployed | current | gain |
+| --- | --- | --- | --- |
+| listing, 60 entries | 1137 rps | 1679 rps | **1.48x** |
+| login | 2668 rps | 3627 rps | **1.36x** |
+
+Binary and templates must ship together: Drive's templates are written for the escaping rules of
+the binary they were built against. The Sep-14 mirror calls `html_escape()` inline because
+`<?lua= ?>` did not escape then; served through a current binary every filename double-escapes and
+the CSRF hidden input is emitted escaped, which breaks every form on the site. `deploy/stage.sh`
+refreshes both halves from the repo in one step for exactly this reason.
+
 **Where the remaining time goes**, sampled with `cargo run --release --example profile_render`
 (lua54, 1000 rows, 1624us/render):
 
