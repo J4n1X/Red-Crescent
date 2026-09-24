@@ -1,0 +1,34 @@
+<?lua
+    -- The next page of a folder listing as bare table rows, for drive.js to
+    -- append as the user scrolls. Without JS the same cursor goes to index.
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local filesm = require("lib.files")
+
+    local db = dbm.open()
+    local user = auth.require_login(db)
+
+    local folder = nil
+    if request.query.folder and request.query.folder ~= "" then
+        folder = filesm.get_folder(db, user, request.query.folder)
+        if not folder then
+            response.status = 404
+            exit()
+        end
+    end
+
+    local after = filesm.cursor_from(request.query)
+    if not after then
+        response.status = 400
+        exit()
+    end
+    listing_rows, listing_next = filesm.list_page(db, user, folder, after)
+    listing_folder_param = folder and tostring(folder.id) or ""
+
+    folder_path_prefix = ""
+    for _, crumb in ipairs(filesm.breadcrumbs(db, user, folder)) do
+        folder_path_prefix = folder_path_prefix .. "/" .. crumb.name
+    end
+    archiver = require("lib.archive").detect()
+    response.headers["Cache-Control"] = "no-store"
+?><?lua include("partials/rows.lhtml") ?>

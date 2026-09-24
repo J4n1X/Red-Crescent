@@ -380,4 +380,63 @@
                     "Could not reach the server.");
             });
     });
+
+    // --- listing: load more as you scroll -----------------------------------
+    //
+    // The last row links to the next page. With script it is swapped for the
+    // rows it points at once it nears the viewport. A failed or redirected
+    // fetch (an expired session) turns it back into an ordinary link.
+
+    var moreLoading = false;
+    var moreObserver = window.IntersectionObserver && window.fetch
+        ? new IntersectionObserver(function (entries) {
+            for (var i = 0; i < entries.length; i++) {
+                if (entries[i].isIntersecting) { loadMore(entries[i].target); }
+            }
+        }, { rootMargin: "800px 0px" })
+        : null;
+
+    function watchMore() {
+        var link = document.querySelector("tr.more a[data-more]");
+        if (link && moreObserver) { moreObserver.observe(link.closest("tr")); }
+    }
+
+    function loadMore(row) {
+        var link = row.querySelector("a[data-more]");
+        if (moreLoading || !link) { return; }
+        moreLoading = true;
+        moreObserver.unobserve(row);
+        link.textContent = "Loading…";
+        fetch(link.getAttribute("data-more"), { credentials: "same-origin" })
+            .then(function (res) {
+                if (!res.ok || res.redirected) { throw new Error("unavailable"); }
+                return res.text();
+            })
+            .then(function (html) {
+                var template = document.createElement("template");
+                template.innerHTML = "<table><tbody>" + html + "</tbody></table>";
+                var rows = template.content.querySelector("tbody").children;
+                var fragment = document.createDocumentFragment();
+                while (rows.length) { fragment.appendChild(rows[0]); }
+                row.parentNode.replaceChild(fragment, row);
+                moreLoading = false;
+                watchMore();
+            })
+            .catch(function () {
+                link.removeAttribute("data-more");
+                link.textContent = "Show more";
+                moreLoading = false;
+            });
+    }
+
+    document.addEventListener("click", function (event) {
+        var link = event.target.closest ? event.target.closest("a[data-more]") : null;
+        if (!link || !moreObserver) { return; }
+        if (event.button !== 0 || event.ctrlKey || event.metaKey ||
+            event.shiftKey || event.altKey) { return; }
+        event.preventDefault();
+        loadMore(link.closest("tr"));
+    });
+
+    watchMore();
 }());

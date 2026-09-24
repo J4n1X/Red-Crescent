@@ -1,0 +1,43 @@
+<?lua
+    -- Expects globals: listing_rows, listing_next (cursor row or nil),
+    -- listing_folder_param, folder_path_prefix, archiver.
+    local util = require("lib.util")
+    local filesm = require("lib.files")
+?><?lua for _, row in ipairs(listing_rows) do ?>
+    <?lua if row.kind == "folder" then ?>
+        <tr>
+            <td>📁 <a href="/?folder=<?lua= row.id ?>"><?lua= row.name ?></a></td>
+            <td class="meta">—</td>
+            <td class="meta"><?lua= util.format_time(row.created_at) ?></td>
+            <td class="actions">
+                <a href="/shares.lhtml?folder=<?lua= row.id ?>" title="Share" aria-label="Share">🔗</a>
+                <?lua if archiver then ?>
+                    <a data-archive href="/archive.lhtml?folder=<?lua= row.id ?>"
+                       title="Download" aria-label="Download">⬇</a>
+                <?lua end ?>
+                <a href="/manage.lhtml?folder=<?lua= row.id ?>" data-manage data-kind="folder"
+                   data-name="<?lua= row.name ?>"
+                   data-path="<?lua= folder_path_prefix .. "/" .. row.name ?>"
+                   title="Manage" aria-label="Manage">⚙</a>
+            </td>
+        </tr>
+    <?lua else ?>
+        <tr>
+            <td>📄 <a href="/download.lhtml?id=<?lua= row.id ?>"><?lua= row.name ?></a></td>
+            <td class="meta"><?lua= util.human_size(row.size) ?></td>
+            <td class="meta"><?lua= util.format_time(row.created_at) ?></td>
+            <td class="actions">
+                <a href="/shares.lhtml?file=<?lua= row.id ?>" title="Share" aria-label="Share">🔗</a>
+                <a href="/manage.lhtml?file=<?lua= row.id ?>" data-manage
+                   data-name="<?lua= row.name ?>"
+                   title="Manage" aria-label="Manage">⚙</a>
+            </td>
+        </tr>
+    <?lua end ?>
+<?lua end ?>
+<?lua if listing_next then
+    local q = "folder=" .. listing_folder_param .. "&" .. filesm.cursor_query(listing_next) ?>
+    <tr class="more">
+        <td colspan="4"><a href="/?<?lua= q ?>" data-more="/rows.lhtml?<?lua= q ?>">Show more</a></td>
+    </tr>
+<?lua end ?>

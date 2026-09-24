@@ -2,6 +2,7 @@
 -- ownership in SQL — a valid session can never touch another user's rows.
 local dbm = require("lib.db")
 local config = require("config")
+local util = require("lib.util")
 local M = {}
 
 function M.disk_path(file)
@@ -64,6 +65,65 @@ function M.list(db, user, folder)
             { user.id }),
         db:query("SELECT * FROM files WHERE owner_id = ? AND folder_id IS NULL ORDER BY name",
             { user.id })
+end
+
+M.PAGE_SIZE = 200
+
+-- The cursor a listing page continues from, read from ak/an/ai query params.
+function M.cursor_from(query)
+    local kind, id = query.ak, tonumber(query.ai)
+    if (kind == "folder" or kind == "file") and id and query.an then
+        return { kind = kind, name = query.an, id = id }
+    end
+    return nil
+end
+
+-- Query string continuing after `row`, for a link or a fetch.
+function M.cursor_query(row)
+    return "ak=" .. row.kind .. "&an=" .. util.urlencode(row.name) .. "&ai=" .. row.id
+end
+
+-- One page of the listing inside `folder`: folders, then files, each by name.
+-- Rows carry `kind`. Keyset rather than OFFSET, so deep pages cost the same as
+-- the first. Returns the rows and the cursor row for the next page, or nil.
+function M.list_page(db, user, folder, after)
+    local want = M.PAGE_SIZE + 1 -- one extra reveals whether more follow
+    local rows = {}
+
+    local function fetch(kind, sql_table, parent_col)
+        local sql = "SELECT * FROM " .. sql_table .. " WHERE owner_id = ? AND " .. parent_col
+        local params = { user.id }
+        if folder then
+            sql = sql .. " = ?"
+            params[#params + 1] = folder.id
+        else
+            sql = sql .. " IS NULL"
+        end
+        if after and after.kind == kind then
+            sql = sql .. " AND (name > ? OR (name = ? AND id > ?))"
+            params[#params + 1] = after.name
+            params[#params + 1] = after.name
+            params[#params + 1] = after.id
+        end
+        params[#params + 1] = want - #rows
+        for _, row in ipairs(db:query(sql .. " ORDER BY name, id LIMIT ?", params)) do
+            row.kind = kind
+            rows[#rows + 1] = row
+        end
+    end
+
+    if not after or after.kind == "folder" then
+        fetch("folder", "folders", "parent_id")
+    end
+    if #rows < want then
+        fetch("file", "files", "folder_id")
+    end
+
+    if #rows > M.PAGE_SIZE then
+        rows[#rows] = nil
+        return rows, rows[#rows]
+    end
+    return rows, nil
 end
 
 function M.all_folders(db, user)
@@ -309,26 +369,32 @@ end
 
 -- Recursively deletes a folder: all contained files (rows + disk) and
 -- subfolders. Iterative so deep trees can't blow the stack.
+-- One transaction: row by row, each delete was its own commit and a
+-- 20000-file folder ran out of time half deleted. The foreign keys cascade to
+-- subfolders, files and shares. Blobs go after the commit, and any a failure
+-- leaves behind are collected by the cleanup thread.
 function M.delete_folder(db, user, folder)
-    local ids = { folder.id }
-    local stack = { folder.id }
-    while #stack > 0 do
-        local id = table.remove(stack)
-        for _, child in ipairs(db:query(
-            "SELECT id FROM folders WHERE parent_id = ? AND owner_id = ?", { id, user.id })) do
-            table.insert(ids, child.id)
-            table.insert(stack, child.id)
-        end
+    db:execute("BEGIN")
+    local ok, files = pcall(function()
+        local files = db:query([[
+            WITH RECURSIVE sub(id) AS (
+                SELECT ?
+                UNION ALL
+                SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id
+                WHERE f.owner_id = ?)
+            SELECT stored_name FROM files
+            WHERE owner_id = ? AND folder_id IN (SELECT id FROM sub)]],
+            { folder.id, user.id, user.id })
+        db:execute("DELETE FROM folders WHERE id = ? AND owner_id = ?", { folder.id, user.id })
+        return files
+    end)
+    if not ok then
+        db:execute("ROLLBACK")
+        error(files, 0)
     end
-    for _, id in ipairs(ids) do
-        for _, file in ipairs(db:query(
-            "SELECT * FROM files WHERE folder_id = ? AND owner_id = ?", { id, user.id })) do
-            M.delete_file(db, user, file)
-        end
-    end
-    -- Children were appended after their parents; delete in reverse.
-    for i = #ids, 1, -1 do
-        db:execute("DELETE FROM folders WHERE id = ? AND owner_id = ?", { ids[i], user.id })
+    db:execute("COMMIT")
+    for _, file in ipairs(files) do
+        os.remove(M.disk_path(file))
     end
 end
 

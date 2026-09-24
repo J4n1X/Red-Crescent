@@ -1,0 +1,11 @@
+[Unit]
+Description=Red Crescent socket for %i
+
+[Socket]
+ListenStream=/run/red-crescent/%i.sock
+# nginx connects as www-data; nobody else needs to.
+SocketGroup=www-data
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target
