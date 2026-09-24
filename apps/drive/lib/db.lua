@@ -117,6 +117,12 @@ local MIGRATIONS = {
         [[CREATE INDEX IF NOT EXISTS idx_archive_jobs_signature
           ON archive_jobs(owner_id, folder_id, signature, status)]],
     },
+    -- 6: deleting a folder cascades by parent key alone, which the owner-first
+    -- indexes cannot serve: without these every deleted folder scans the table.
+    {
+        "CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id)",
+        "CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id)",
+    },
 }
 
 function M.open()

@@ -36,6 +36,7 @@ table.listing { width: 100%; border-collapse: collapse; margin-top: 1rem; }
 .listing tr:hover td { background: rgba(100,255,218,.04); }
 .listing .meta { opacity: .65; font-size: .9rem; white-space: nowrap; }
 .listing .actions { text-align: right; white-space: nowrap; }
+.listing tr.more td { text-align: center; padding: 1rem; }
 
 .panel {
     background: #112240; border: 1px solid #1f3a5f; border-radius: 10px;

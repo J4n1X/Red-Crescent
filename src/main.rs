@@ -5,6 +5,8 @@ use actix_web::{App, HttpServer, middleware, web};
 use clap::Parser;
 
 use red_crescent::config::{Config, Settings, load_file_config};
+#[cfg(unix)]
+use red_crescent::listen::Inherited;
 use red_crescent::runtime::{ConfigId, Limits, RenderConfig, ThreadLimits};
 use red_crescent::template::TemplateCache;
 use red_crescent::threads::{self, ThreadRegistry};
@@ -117,9 +119,20 @@ async fn main() -> std::io::Result<()> {
         threads::spawn_named((*render_cfg).clone(), rel, rel, None).unwrap_or_else(|e| fatal(e));
     }
 
+    #[cfg(unix)]
+    let inherited = red_crescent::listen::from_systemd().unwrap_or_else(|e| fatal(e));
+    #[cfg(unix)]
+    let listening_on = match &inherited {
+        Some(Inherited::Tcp(l)) => format!("http://{} (from systemd)", l.local_addr()?),
+        Some(Inherited::Unix(l)) => format!("{:?} (from systemd)", l.local_addr()?),
+        None => format!("http://{}", config.bind),
+    };
+    #[cfg(not(unix))]
+    let listening_on = format!("http://{}", config.bind);
+
     log::info!(
-        "Red Crescent listening on http://{} serving {} (data: {}){}",
-        config.bind,
+        "Red Crescent listening on {} serving {} (data: {}){}",
+        listening_on,
         serve_dir.display(),
         data_dir.display(),
         if config.dev { " (dev mode)" } else { "" }
@@ -141,7 +154,7 @@ async fn main() -> std::io::Result<()> {
         config: config.clone(),
     });
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
             .wrap(middleware::Logger::default())
@@ -157,8 +170,16 @@ async fn main() -> std::io::Result<()> {
         {
             log::debug!("failed to set TCP_NODELAY: {e}");
         }
-    })
-    .bind(&config.bind)?
-    .run()
-    .await
+    });
+
+    #[cfg(unix)]
+    let server = match inherited {
+        Some(Inherited::Tcp(l)) => server.listen(l)?,
+        Some(Inherited::Unix(l)) => server.listen_uds(l)?,
+        None => server.bind(&config.bind)?,
+    };
+    #[cfg(not(unix))]
+    let server = server.bind(&config.bind)?;
+
+    server.run().await
 }

@@ -1,0 +1,35 @@
+[Unit]
+Description=Red Crescent app %i
+Requires=red-crescent@%i.socket
+After=red-crescent@%i.socket
+
+[Service]
+Type=simple
+# One system user per app, named like the instance.
+User=%i
+Group=%i
+WorkingDirectory=/var/www/%i
+# The binary sits beside the app: templates are written against the escaping
+# rules of the binary they shipped with, so each app upgrades on its own.
+ExecStart=/var/www/%i/Red-Crescent --serve-dir /var/www/%i/app
+
+# The socket comes from systemd, so RC_BIND and `bind` are ignored.
+Environment=RC_DATA_DIR=/var/www/%i/data
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/red-crescent/%i.env
+
+Restart=on-failure
+RestartSec=2s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/www/%i/data
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+# Only for apps with boot-time threads that must run before the first request.
+[Install]
+WantedBy=multi-user.target

@@ -1374,6 +1374,195 @@ async fn the_listing_emits_one_move_select_regardless_of_row_count() {
 }
 
 #[actix_web::test]
+async fn large_folders_are_listed_a_page_at_a_time() {
+    let (app, _data_dir) = app_with(drive_config()).await;
+    post_form(
+        &app,
+        "/register.lhtml",
+        None,
+        "username=admin&password=adminpass1&password2=adminpass1".to_string(),
+    )
+    .await;
+    let admin = login(&app, "admin", "adminpass1").await.expect("session");
+    let csrf = csrf_of(&app, &admin).await;
+
+    // One page is 200 rows: 205 folders and 3 files cross both the page and
+    // the folders-to-files boundary.
+    for i in 0..205 {
+        post_form(
+            &app,
+            "/actions.lhtml",
+            Some(&admin),
+            format!("csrf={csrf}&action=mkdir&folder=&name=f{i:03}"),
+        )
+        .await;
+    }
+    let payload = multipart_body(
+        BOUNDARY,
+        &[
+            ("csrf", None, csrf.as_bytes()),
+            ("action", None, b"upload"),
+            ("folder", None, b""),
+            ("file", Some("a.txt"), b"a"),
+            ("file", Some("b.txt"), b"b"),
+            ("file", Some("c.txt"), b"c"),
+        ],
+    );
+    test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/actions.lhtml")
+            .insert_header((header::COOKIE, format!("session={admin}")))
+            .insert_header((
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            ))
+            .set_payload(payload)
+            .to_request(),
+    )
+    .await;
+
+    let names = |html: &str| -> Vec<String> {
+        html.split("data-name=\"")
+            .skip(1)
+            .map(|s| s[..s.find('"').unwrap()].to_string())
+            .collect()
+    };
+
+    let first = body_string(get(&app, "/", Some(&admin)).await).await;
+    assert_eq!(names(&first).len(), 200);
+    assert_eq!(names(&first)[199], "f199");
+    let more = find_between(&first, "data-more=\"", "\"")
+        .expect("a next-page link")
+        .replace("&amp;", "&");
+    let page_href = find_between(&first, "<a href=\"/?folder=&amp;ak=", "\"")
+        .expect("a no-script next-page link")
+        .replace("&amp;", "&");
+
+    let second = body_string(get(&app, &more, Some(&admin)).await).await;
+    assert!(!second.contains("<html"), "the fragment is bare rows");
+    assert!(!second.contains("data-more"), "the last page links nowhere");
+    let rest = names(&second);
+    assert_eq!(
+        rest,
+        [
+            "f200", "f201", "f202", "f203", "f204", "a.txt", "b.txt", "c.txt"
+        ]
+    );
+
+    // Without script the same cursor is a whole page.
+    let page =
+        body_string(get(&app, &format!("/?folder=&ak={page_href}"), Some(&admin)).await).await;
+    assert!(page.contains("<html"));
+    assert_eq!(names(&page), rest);
+
+    // Logged out, the fragment redirects to the login page like any other.
+    let resp = get(&app, &more, None).await;
+    assert_eq!(resp.status(), StatusCode::FOUND);
+}
+
+#[actix_web::test]
+async fn deleting_a_huge_folder_tree_finishes_and_spares_its_siblings() {
+    // On a real disk: under tmpfs a commit costs nothing, and the row-by-row
+    // delete this guards against would pass.
+    let disk_dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "drive-delete-{}",
+        common::unique_data_dir()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+    ));
+    let (app, data_dir) = app_with(Config {
+        data_dir: disk_dir.clone(),
+        ..drive_config()
+    })
+    .await;
+    post_form(
+        &app,
+        "/register.lhtml",
+        None,
+        "username=admin&password=adminpass1&password2=adminpass1".to_string(),
+    )
+    .await;
+    let admin = login(&app, "admin", "adminpass1").await.expect("session");
+    let csrf = csrf_of(&app, &admin).await;
+
+    let db = rusqlite::Connection::open(data_dir.join("drive/drive.db")).unwrap();
+    let folder_id = |name: &str| -> i64 {
+        db.query_row("SELECT id FROM folders WHERE name = ?1", [name], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+    let mkdir = |parent: String, name: &str| {
+        post_form(
+            &app,
+            "/actions.lhtml",
+            Some(&admin),
+            format!("csrf={csrf}&action=mkdir&folder={parent}&name={name}"),
+        )
+    };
+    mkdir(String::new(), "top").await;
+    mkdir(String::new(), "other").await;
+    mkdir(folder_id("top").to_string(), "sub").await;
+    mkdir(folder_id("sub").to_string(), "deeper").await;
+
+    // Row by row this took minutes and died at the execution limit half done.
+    let files_dir = data_dir.join("drive/files");
+    let insert = |folder: i64, count: usize, prefix: &str| {
+        let tx = db.unchecked_transaction().unwrap();
+        for i in 0..count {
+            let stored = format!("{prefix}{i}");
+            std::fs::write(files_dir.join(&stored), b"x").unwrap();
+            tx.execute(
+                "INSERT INTO files (owner_id, folder_id, name, stored_name, size, created_at)
+                 VALUES (1, ?1, ?2, ?2, 1, 0)",
+                rusqlite::params![folder, stored],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    };
+    insert(folder_id("top"), 20000, "top-");
+    insert(folder_id("deeper"), 3, "deep-");
+    insert(folder_id("other"), 2, "other-");
+
+    let resp = post_form(
+        &app,
+        "/actions.lhtml",
+        Some(&admin),
+        format!(
+            "csrf={csrf}&action=delete_folder&id={}&folder=",
+            folder_id("top")
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    assert!(location(&resp).contains("msg="), "{}", location(&resp));
+
+    let names: Vec<String> = db
+        .prepare("SELECT name FROM folders ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(names, ["other"]);
+    let files: i64 = db
+        .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(files, 2);
+    let mut blobs: Vec<String> = std::fs::read_dir(&files_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    blobs.sort();
+    assert_eq!(blobs, ["other-0", "other-1"]);
+    drop(db);
+    let _ = std::fs::remove_dir_all(&disk_dir);
+}
+
+#[actix_web::test]
 async fn folders_can_be_renamed_and_moved_but_never_into_themselves() {
     let (app, _data_dir) = app_with(drive_config()).await;
     post_form(

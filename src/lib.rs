@@ -2,6 +2,8 @@ pub mod api;
 pub mod config;
 pub mod crypto_api;
 pub mod fs_api;
+#[cfg(unix)]
+pub mod listen;
 pub mod process_api;
 pub mod resolve;
 pub mod runtime;
