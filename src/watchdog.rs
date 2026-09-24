@@ -15,6 +15,7 @@
 //! for a trace to notice.
 
 use std::cell::Cell;
+#[cfg(unix)]
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -42,7 +43,9 @@ pub(crate) struct Slot {
     /// Bumped on every claim: the watchdog must not act on a deadline whose
     /// request has finished.
     generation: AtomicU64,
-    /// `pthread_t` of the rendering thread, to signal it.
+    /// `pthread_t` of the rendering thread, to signal it. Unused on Windows,
+    /// which has nothing to signal -- see `install_handler`.
+    #[cfg_attr(windows, allow(dead_code))]
     thread: AtomicUsize,
     expired: AtomicBool,
     /// Set when the VM actually raised, which is what fails the request.
@@ -63,6 +66,7 @@ impl Slot {
         }
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) fn expired(&self) -> bool {
         self.expired.load(Ordering::Relaxed)
     }
@@ -108,6 +112,7 @@ impl Deadline {
         slot.expired.store(false, Ordering::Relaxed);
         slot.interrupted.store(false, Ordering::Relaxed);
         slot.state.store(state, Ordering::Relaxed);
+        #[cfg(unix)]
         slot.thread
             .store(unsafe { libc::pthread_self() } as usize, Ordering::Relaxed);
         HANDLER_STATE.with(|s| s.set(state));
@@ -133,6 +138,7 @@ impl Drop for Deadline {
 
 /// Whether the calling hook should abort, recording that it did. Clones
 /// nothing and leaves no `Drop` value live: a raise longjmps.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn should_abort() -> bool {
     MY_SLOT
         .try_with(|slot| {
@@ -147,9 +153,11 @@ pub(crate) fn should_abort() -> bool {
 
 /// Chosen because nothing else in this process uses it: Rust's std and tokio
 /// leave it alone, and Go picked it for preemption for the same reason.
+#[cfg(unix)]
 const INTERRUPT_SIGNAL: c_int = libc::SIGURG;
 
 /// Arms the timeout hook on the signalled thread.
+#[cfg(unix)]
 extern "C" fn arm_hook(_sig: c_int) {
     let state = HANDLER_STATE.try_with(|s| s.get()).unwrap_or(0);
     if state == 0 {
@@ -168,6 +176,7 @@ extern "C" fn arm_hook(_sig: c_int) {
     }
 }
 
+#[cfg(unix)]
 fn install_handler() {
     // SAFETY: `arm_hook` touches only a const-init thread-local and Lua's hook
     // fields; it allocates nothing and takes no lock.
@@ -178,6 +187,23 @@ fn install_handler() {
         libc::sigemptyset(&mut action.sa_mask);
         libc::sigaction(INTERRUPT_SIGNAL, &action, std::ptr::null_mut());
     }
+}
+
+/// Windows has no signal that can interrupt a thread mid-computation, so
+/// **execution deadlines are recorded but never enforced** here: a runaway
+/// template runs until it finishes. The sound equivalent is
+/// `SuspendThread` + `lua_sethook` + `ResumeThread`, which is safe for the same
+/// reason the signal is -- the owning thread cannot be updating `L->ci` while
+/// it is frozen -- but it is unwritten and untested.
+///
+/// This exists so the server cross-compiles for a benchmark run. Do not serve
+/// anything untrusted with it.
+#[cfg(windows)]
+fn install_handler() {
+    log::warn!(
+        "windows build: execution timeouts are NOT enforced -- a runaway \
+         template will not be interrupted. Benchmarking only."
+    );
 }
 
 fn start() {
@@ -215,6 +241,7 @@ fn run() {
 
 /// Poke the rendering thread so its handler arms the hook. Repeated each tick
 /// while the deadline stands, so a `pcall` around the raise cannot escape.
+#[cfg(unix)]
 fn interrupt(slot: &Slot) {
     let thread = slot.thread.load(Ordering::Relaxed);
     if thread == 0 {
@@ -224,3 +251,7 @@ fn interrupt(slot: &Slot) {
     // signal is harmless: the handler no-ops on a cleared state.
     unsafe { libc::pthread_kill(thread as libc::pthread_t, INTERRUPT_SIGNAL) };
 }
+
+/// See `install_handler` above: nothing to poke with on Windows.
+#[cfg(windows)]
+fn interrupt(_slot: &Slot) {}
