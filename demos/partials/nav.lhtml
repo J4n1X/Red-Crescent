@@ -3,6 +3,7 @@
     <a href="/demo.lhtml" style="color:#64ffda">Demo</a>
     <a href="/demo2.lhtml" style="color:#64ffda">Request API</a>
     <a href="/api.lhtml" style="color:#64ffda">JSON API</a>
+    <a href="/stream.lhtml" style="color:#64ffda">Streaming</a>
     <a href="/post-test.lhtml" style="color:#64ffda">POST Test</a>
     <a href="/info.lhtml" style="color:#64ffda">Lua Info</a>
 </nav>

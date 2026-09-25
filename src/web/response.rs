@@ -3,10 +3,11 @@
 use actix_web::cookie::{Cookie, SameSite};
 use actix_web::http::StatusCode;
 use actix_web::http::header::{CONTENT_TYPE, ContentDisposition, HeaderName, HeaderValue};
-use actix_web::{HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, HttpResponseBuilder};
 
 use crate::api::html_escape;
 use crate::runtime::{LuaCookie, RenderError, RenderedResponse, SendFileSpec};
+use crate::stream::{Head, Receiver};
 
 pub(super) async fn serve_send_file(req: &HttpRequest, rendered: RenderedResponse) -> HttpResponse {
     let SendFileSpec {
@@ -58,17 +59,36 @@ pub(super) async fn serve_send_file(req: &HttpRequest, rendered: RenderedRespons
 }
 
 pub(super) fn build_response(rendered: RenderedResponse) -> HttpResponse {
-    let status = StatusCode::from_u16(rendered.status).unwrap_or_else(|_| {
-        log::warn!(
-            "invalid status code from Lua: {}, using 200",
-            rendered.status
-        );
+    builder(rendered.status, rendered.headers, rendered.cookies).body(rendered.body)
+}
+
+/// The rest of the body arrives as the template flushes it.
+pub(super) fn build_streaming(head: Head, body: Receiver) -> HttpResponse {
+    let buffering_set = head
+        .headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("x-accel-buffering"));
+    let mut builder = builder(head.status, head.headers, head.cookies);
+    // nginx would otherwise hold the chunks back until the render ends.
+    if !buffering_set {
+        builder.insert_header(("X-Accel-Buffering", "no"));
+    }
+    builder.streaming(body)
+}
+
+fn builder(
+    status: u16,
+    headers: Vec<(String, String)>,
+    cookies: Vec<LuaCookie>,
+) -> HttpResponseBuilder {
+    let status = StatusCode::from_u16(status).unwrap_or_else(|_| {
+        log::warn!("invalid status code from Lua: {status}, using 200");
         StatusCode::OK
     });
 
     let mut builder = HttpResponse::build(status);
     let mut content_type_set = false;
-    for (name, value) in rendered.headers {
+    for (name, value) in headers {
         if name.eq_ignore_ascii_case("content-type") {
             content_type_set = true;
         }
@@ -78,11 +98,10 @@ pub(super) fn build_response(rendered: RenderedResponse) -> HttpResponse {
         builder.content_type("text/html; charset=utf-8");
     }
 
-    for cookie in rendered.cookies {
+    for cookie in cookies {
         builder.cookie(to_actix_cookie(cookie));
     }
-
-    builder.body(rendered.body)
+    builder
 }
 
 fn to_actix_cookie(c: LuaCookie) -> Cookie<'static> {

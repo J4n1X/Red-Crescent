@@ -71,12 +71,15 @@ fn request(path: &str, query: &str) -> RequestData {
 fn measure(cfg: &RenderConfig, page: &Path, name: &str, query: &str, iters: u32) -> (f64, usize) {
     let req = request(&format!("/{name}"), query);
     for _ in 0..50 {
-        render(cfg, page, None, name, &req).expect("warm-up render failed");
+        render(cfg, page, None, name, &req, None).expect("warm-up render failed");
     }
-    let bytes = render(cfg, page, None, name, &req).unwrap().body.len();
+    let bytes = render(cfg, page, None, name, &req, None)
+        .unwrap()
+        .body
+        .len();
     let start = Instant::now();
     for _ in 0..iters {
-        render(cfg, page, None, name, &req).expect("render failed");
+        render(cfg, page, None, name, &req, None).expect("render failed");
     }
     let us = start.elapsed().as_secs_f64() * 1e6 / iters as f64;
     (us, bytes)

@@ -1,7 +1,7 @@
 local shared = ...
 
 local search, include = shared.search, shared.include
-local set_cookie, send_file = shared.set_cookie, shared.send_file
+local set_cookie, send_file, flush = shared.set_cookie, shared.send_file, shared.flush
 local native_require = shared.native_require
 local mark, unmodified = shared.mark_finalizers, shared.unmodified
 
@@ -9,7 +9,7 @@ local TABLES = { --[[TABLES]] }
 local FUNCS = { --[[FUNCS]] }
 
 local next, select, error, tostring, rawload, type = next, select, error, tostring, load, type
-local rawget, setmetatable = rawget, setmetatable
+local rawget, rawset, setmetatable, pcall = rawget, rawset, setmetatable, pcall
 local G, VERSION = _G, _VERSION
 local pkg_path, pkg_cpath = package.path, package.cpath
 local pkg_config, loadlib = package.config, package.loadlib
@@ -65,6 +65,26 @@ for i = 1, #TABLES do
     if sources[i] ~= nil then copy_of(i) end
 end
 
+-- After the first flush the head is gone; a write to it raises rather than
+-- vanishing. Reads keep working. A table with a protected metatable is left be.
+local function seal(t, what)
+    local fields = {}
+    for k, v in next, t do fields[k] = v end
+    local ok = pcall(setmetatable, t, {
+        __index = fields,
+        __newindex = function()
+            error(what .. ": output has already been flushed", 2)
+        end,
+        __pairs = function() return next, fields, nil end,
+        __metatable = false,
+    })
+    if ok then
+        for k in next, fields do rawset(t, k, nil) end
+    else 
+        error(what .. ": setmetatable failed, output may have already been flushed", 2)
+    end
+end
+
 local function reset()
     for i = 1, #TABLES do
         local copy = copies[i]
@@ -93,6 +113,7 @@ local function build(request)
         },
         require = nil,
         include = nil,
+        flush = nil,
         load = nil,
         loadstring = nil,
         response = {
@@ -132,6 +153,15 @@ local function build(request)
     end
 
     env.include = function(rel) return include(rel, env) end
+
+    env.flush = function()
+        local response = env.response
+        if flush(response) and type(response) == "table" then
+            local headers = rawget(response, "headers")
+            if type(headers) == "table" then seal(headers, "response.headers") end
+            seal(response, "response")
+        end
+    end
 
     return env
 end

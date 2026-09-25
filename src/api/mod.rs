@@ -106,6 +106,7 @@ pub(crate) fn install_request_api(lua: &Lua, cfg: &RenderConfig) -> mlua::Result
     shared.set("include", modules::include(lua, cfg)?)?;
     shared.set("set_cookie", response::set_cookie(lua)?)?;
     shared.set("send_file", response::send_file(lua, cfg)?)?;
+    shared.set("flush", response::flush(lua)?)?;
 
     request::install(lua)?;
     env::install(lua, shared)

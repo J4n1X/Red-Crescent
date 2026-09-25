@@ -1,7 +1,7 @@
-//! Control flow and response helpers: `exit`, `redirect`, `set_cookie` and
-//! `send_file`.
+//! Control flow and response helpers: `exit`, `redirect`, `set_cookie`,
+//! `send_file` and `flush`.
 
-use mlua::{Function, Lua, Table};
+use mlua::{Function, Lua, Table, Value};
 
 use super::with_state;
 use crate::resolve::is_private;
@@ -30,6 +30,7 @@ pub(super) fn install_control_flow(lua: &Lua) -> mlua::Result<()> {
                     )));
                 }
                 with_state(|st| {
+                    st.check_uncommitted("redirect")?;
                     *st.redirect.borrow_mut() = Some((url, status));
                     Ok(())
                 })?;
@@ -65,6 +66,7 @@ pub(super) fn set_cookie(lua: &Lua) -> mlua::Result<Function> {
             )));
         }
         with_state(|st| {
+            st.check_uncommitted("set_cookie")?;
             st.cookies.borrow_mut().push(cookie);
             Ok(())
         })
@@ -108,6 +110,7 @@ pub(super) fn send_file(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<Function>
             None => (None, None),
         };
         with_state(|st| {
+            st.check_uncommitted("send_file")?;
             *st.send_file.borrow_mut() = Some(SendFileSpec {
                 path: abs,
                 download_name,
@@ -115,5 +118,20 @@ pub(super) fn send_file(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<Function>
             });
             Ok(())
         })
+    })
+}
+
+/// Sends what has been written so far; the first call fixes status, headers
+/// and cookies. Takes the request's `response` table, which the environment
+/// builder passes and then seals.
+pub(super) fn flush(lua: &Lua) -> mlua::Result<Function> {
+    lua.create_function(|_, response: Value| {
+        // Waits on the client, so the template stays off the inline path.
+        super::mark_blocking();
+        let response = match response {
+            Value::Table(t) => Some(t),
+            _ => None,
+        };
+        with_state(|st| st.flush(response))
     })
 }

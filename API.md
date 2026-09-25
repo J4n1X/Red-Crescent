@@ -160,7 +160,34 @@ response.send_file(server.data_dir .. "/store/report.pdf", {
     download_name = "Report.pdf",         -- optional: Content-Disposition attachment
     content_type = "application/pdf",     -- optional: override the guessed type
 })
+
+flush()                         -- send what has been written so far
 ```
+
+### Streaming
+
+A response is normally buffered and sent whole when the template finishes. `flush()` sends what
+has been written so far right away, as a chunked response, which is how you show progress during a
+long operation, send server-sent events, or produce a large export without holding it in memory.
+A template that never calls `flush()` behaves exactly as before. See `demos/stream.lhtml`.
+
+**The first `flush()` sends the head.** After it, changing `response.status` or
+`response.headers`, or calling `set_cookie`, `redirect` or `send_file`, raises an error rather
+than being silently lost — PHP's "headers already sent". Set everything you need first.
+`flush()` after `send_file` raises too, since that output is never sent.
+
+Things to accept before using it:
+
+- **A streamed response cannot become an error page.** If the template fails after the first
+  flush, the client already has a 200 and part of the body; the server logs the error and cuts
+  the connection, so the body reads as incomplete rather than plausibly complete.
+- **The execution time limit still applies**, measured from the start of the request, so it also
+  caps how long a stream can last. Raise `--timeout-ms` for a long-lived event stream.
+- **A slow client holds a render thread.** At most 64 KiB waits unsent; beyond that `flush()`
+  waits for the client, up to the time limit. A client that disconnects stops the template at its
+  next `flush()`, as `exit()` would.
+- Streamed responses carry `X-Accel-Buffering: no` so nginx passes chunks on as they come, unless
+  the template set that header itself.
 
 ## Includes and modules
 

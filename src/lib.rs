@@ -8,6 +8,7 @@ pub mod process_api;
 pub mod resolve;
 pub mod runtime;
 pub mod sqlite_api;
+pub mod stream;
 pub mod template;
 pub mod threads;
 pub(crate) mod watchdog;

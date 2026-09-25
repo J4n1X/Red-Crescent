@@ -10,11 +10,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mlua::{Lua, Table, Value};
 
 use crate::api;
+use crate::stream::{Head, Message, SendError, Sender};
 use crate::template::{TemplateCache, TemplateError};
 use crate::threads::ThreadRegistry;
 
@@ -201,19 +202,95 @@ pub(crate) struct RenderState {
     pub redirect: RefCell<Option<(String, u16)>>,
     pub send_file: RefCell<Option<SendFileSpec>>,
     pub include_depth: Cell<u32>,
+    /// Where `flush()` sends; `None` when rendering inline, where it only
+    /// commits the head and the body goes out whole.
+    stream: RefCell<Option<Sender>>,
+    /// Set by the first `flush()`; the head is fixed from then on.
+    pub committed: Cell<bool>,
+    /// The committed head when there is no stream to send it into.
+    head: RefCell<Option<Head>>,
+    /// Bounds a send to a client that stopped reading, which the timeout hook
+    /// cannot interrupt.
+    deadline: Instant,
 }
 
 impl RenderState {
-    fn new() -> Self {
+    fn new(stream: Option<Sender>, timeout: Duration) -> Self {
         RenderState {
             out: RefCell::new(Vec::new()),
             cookies: RefCell::new(Vec::new()),
             redirect: RefCell::new(None),
             send_file: RefCell::new(None),
             include_depth: Cell::new(0),
+            stream: RefCell::new(stream),
+            committed: Cell::new(false),
+            head: RefCell::new(None),
+            deadline: Instant::now() + timeout,
         }
     }
+
+    /// `flush()`: commits the head on the first call, then sends what has been
+    /// written so far. Whether this was the first call.
+    pub(crate) fn flush(&self, response: Option<Table>) -> mlua::Result<bool> {
+        let first = !self.committed.get();
+        if first {
+            if self.send_file.borrow().is_some() {
+                return Err(mlua::Error::runtime(
+                    "flush: send_file() has already replaced the output",
+                ));
+            }
+            let (status, headers) = response.map_or((200, Vec::new()), |t| read_response(&t));
+            let head = Head {
+                status,
+                headers,
+                cookies: self.cookies.take(),
+            };
+            self.committed.set(true);
+            match &*self.stream.borrow() {
+                Some(tx) => self.send(tx, Message::Head(head))?,
+                None => *self.head.borrow_mut() = Some(head),
+            }
+        }
+        if let Some(tx) = &*self.stream.borrow() {
+            let bytes = self.out.take();
+            if !bytes.is_empty() {
+                self.send(tx, Message::Chunk(bytes.into()))?;
+            }
+        }
+        Ok(first)
+    }
+
+    fn send(&self, tx: &Sender, message: Message) -> mlua::Result<()> {
+        tx.send(message, self.deadline).map_err(|e| match e {
+            // Stops the template the way exit() does; nobody is reading.
+            SendError::Disconnected => mlua::Error::external(ExitSignal),
+            SendError::Timeout => mlua::Error::external(StreamTimeout),
+        })
+    }
+
+    /// Raises once the head is committed; `what` names the caller.
+    pub(crate) fn check_uncommitted(&self, what: &str) -> mlua::Result<()> {
+        if self.committed.get() {
+            return Err(mlua::Error::runtime(format!(
+                "{what}: output has already been flushed"
+            )));
+        }
+        Ok(())
+    }
 }
+
+/// A flush that waited out the request's time limit on a client that stopped
+/// reading.
+#[derive(Debug)]
+struct StreamTimeout;
+
+impl fmt::Display for StreamTimeout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "flush: the client stopped reading")
+    }
+}
+
+impl std::error::Error for StreamTimeout {}
 
 /// Raised by `exit()`/`redirect()` to unwind out of the template cleanly.
 #[derive(Debug)]
@@ -276,6 +353,7 @@ pub fn render(
     template_meta: Option<&std::fs::Metadata>,
     display_name: &str,
     request: &RequestData,
+    stream: Option<Sender>,
 ) -> Result<RenderedResponse, RenderError> {
     let template = cfg
         .cache
@@ -286,7 +364,7 @@ pub fn render(
     // coexist with reuse. Opt-in, so the default path still pools.
     if !cfg.pool || cfg.c_module_path.is_some() {
         let (lua, address) = build_state(cfg)?;
-        return render_on(&lua, address, cfg, &template, request);
+        return render_on(&lua, address, cfg, &template, request, stream);
     }
 
     let mut state = match POOLED.with(|p| p.borrow_mut().take()) {
@@ -305,7 +383,7 @@ pub fn render(
     // Left set by a state that was not pooled or not retained.
     api::take_finalizers();
 
-    let result = render_on(&state.lua, state.address, cfg, &template, request);
+    let result = render_on(&state.lua, state.address, cfg, &template, request, stream);
 
     if let Some(state) = retain(state, cfg, &result) {
         POOLED.with(|p| *p.borrow_mut() = Some(state));
@@ -365,8 +443,9 @@ fn render_on(
     cfg: &RenderConfig,
     template: &Arc<crate::template::CompiledChunk>,
     request: &RequestData,
+    stream: Option<Sender>,
 ) -> Result<RenderedResponse, RenderError> {
-    let state = RenderState::new();
+    let state = RenderState::new(stream, cfg.limits.timeout);
     let _scope = api::RequestScope::new(&state);
     // Released on drop, so an unwind cannot leave a deadline armed against the
     // next request this thread serves.
@@ -386,14 +465,22 @@ fn render_on(
     }
 
     if let Err(err) = exec_result {
+        // Returning drops the stream unfinished, which truncates the body.
         match classify_lua_error(&err) {
             LuaFailure::Exit => {} // clean early exit — fall through to the response
             LuaFailure::Memory => return Err(RenderError::Memory),
+            LuaFailure::Timeout => return Err(RenderError::Timeout),
             LuaFailure::Error => return Err(RenderError::Lua(err.to_string())),
         }
     }
 
-    let (mut status, mut headers) = read_response(&env);
+    if state.committed.get() {
+        return Ok(finish_committed(state));
+    }
+
+    let (mut status, mut headers) = env
+        .get::<Table>("response")
+        .map_or((200, Vec::new()), |t| read_response(&t));
 
     if let Some((url, redirect_status)) = state.redirect.borrow_mut().take() {
         status = redirect_status;
@@ -409,37 +496,68 @@ fn render_on(
     })
 }
 
-/// Status and headers from the template's `response` table, skipping (and
-/// logging) values of the wrong type.
-fn read_response(env: &Table) -> (u16, Vec<(String, String)>) {
+/// A render that flushed. Streamed, the rest of the output goes out and the
+/// body ends; inline, the response is the committed head and the whole body.
+fn finish_committed(state: RenderState) -> RenderedResponse {
+    let mut body = state.out.take();
+    let head = match state.stream.take() {
+        Some(tx) => {
+            let tail = std::mem::take(&mut body);
+            // A client that went away has nothing left to miss.
+            if tail.is_empty() || state.send(&tx, Message::Chunk(tail.into())).is_ok() {
+                tx.finish();
+            }
+            None
+        }
+        None => state.head.take(),
+    };
+    let Head {
+        status,
+        headers,
+        cookies,
+    } = head.unwrap_or(Head {
+        status: 200,
+        headers: Vec::new(),
+        cookies: Vec::new(),
+    });
+    RenderedResponse {
+        body,
+        status,
+        headers,
+        cookies,
+        send_file: None,
+    }
+}
+
+/// Status and headers from a `response` table, skipping (and logging) values
+/// of the wrong type.
+fn read_response(response_table: &Table) -> (u16, Vec<(String, String)>) {
     let mut status: u16 = 200;
     let mut headers: Vec<(String, String)> = Vec::new();
-    if let Ok(response_table) = env.get::<Table>("response") {
-        match response_table.get::<Value>("status") {
-            Ok(Value::Nil) => {}
-            Ok(value) => match status_from_value(&value) {
-                Some(n) => status = n,
+    match response_table.get::<Value>("status") {
+        Ok(Value::Nil) => {}
+        Ok(value) => match status_from_value(&value) {
+            Some(n) => status = n,
+            None => log::warn!(
+                "ignoring invalid response.status from Lua ({})",
+                value.type_name()
+            ),
+        },
+        Err(_) => {}
+    }
+
+    if let Ok(headers_table) = response_table.get::<Table>("headers") {
+        for pair in headers_table.pairs::<String, Value>() {
+            let Ok((name, value)) = pair else {
+                log::warn!("ignoring response header with non-string name");
+                continue;
+            };
+            match header_value_to_string(&value) {
+                Some(v) => headers.push((name, v)),
                 None => log::warn!(
-                    "ignoring invalid response.status from Lua ({})",
+                    "ignoring response header '{name}' with unsupported value type {}",
                     value.type_name()
                 ),
-            },
-            Err(_) => {}
-        }
-
-        if let Ok(headers_table) = response_table.get::<Table>("headers") {
-            for pair in headers_table.pairs::<String, Value>() {
-                let Ok((name, value)) = pair else {
-                    log::warn!("ignoring response header with non-string name");
-                    continue;
-                };
-                match header_value_to_string(&value) {
-                    Some(v) => headers.push((name, v)),
-                    None => log::warn!(
-                        "ignoring response header '{name}' with unsupported value type {}",
-                        value.type_name()
-                    ),
-                }
             }
         }
     }
@@ -469,6 +587,7 @@ fn header_value_to_string(value: &Value) -> Option<String> {
 enum LuaFailure {
     Exit,
     Memory,
+    Timeout,
     Error,
 }
 
@@ -482,6 +601,9 @@ fn classify_lua_error(err: &mlua::Error) -> LuaFailure {
     for cause in err.chain() {
         if cause.downcast_ref::<ExitSignal>().is_some() {
             return LuaFailure::Exit;
+        }
+        if cause.downcast_ref::<StreamTimeout>().is_some() {
+            return LuaFailure::Timeout;
         }
         if let Some(inner) = cause.downcast_ref::<mlua::Error>()
             && matches!(inner, mlua::Error::MemoryError(_))
@@ -544,7 +666,7 @@ mod tests {
     }
 
     fn body(cfg: &RenderConfig, page: &Path) -> String {
-        let rendered = render(cfg, page, None, "p.lhtml", &request()).expect("render failed");
+        let rendered = render(cfg, page, None, "p.lhtml", &request(), None).expect("render failed");
         String::from_utf8(rendered.body).unwrap()
     }
 
@@ -752,7 +874,7 @@ setmetatable({}, mt)
         let mut cfg = config(dir.path());
         cfg.limits.memory_bytes = 4 * 1024 * 1024;
 
-        let Err(err) = render(&cfg, &page, None, "p.lhtml", &request()) else {
+        let Err(err) = render(&cfg, &page, None, "p.lhtml", &request(), None) else {
             panic!("the memory limit was not hit");
         };
         assert!(matches!(err, RenderError::Memory), "got {err:?}");
@@ -772,6 +894,53 @@ setmetatable({}, mt)
 
         assert_eq!(body(&cfg, &page), "ok");
         assert_eq!(parked(), None);
+    }
+
+    /// Inline there is no stream: the flush fixes the head and the body goes
+    /// out whole with it.
+    #[test]
+    fn an_inline_flush_commits_the_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            r#"<?lua
+response.status = 201
+response.headers["X-Kept"] = "yes"
+print("a")
+flush()
+print(tostring(pcall(function() response.status = 500 end)))
+print(tostring(pcall(function() response.headers["X-Late"] = "no" end)))
+print(response.status)
+?>"#,
+        );
+        let cfg = config(dir.path());
+        let rendered = render(&cfg, &page, None, "p.lhtml", &request(), None).unwrap();
+        assert_eq!(String::from_utf8(rendered.body).unwrap(), "afalsefalse201");
+        assert_eq!(rendered.status, 201);
+        assert_eq!(
+            rendered.headers,
+            vec![("X-Kept".to_string(), "yes".to_string())]
+        );
+    }
+
+    /// Nothing interrupts a wait on a client that stopped reading but its own
+    /// deadline, which has to fail the request like any timeout.
+    #[test]
+    fn a_client_that_stops_reading_times_the_request_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = write(
+            dir.path(),
+            "p.lhtml",
+            r#"<?lua while true do print(("x"):rep(100)) flush() end ?>"#,
+        );
+        let mut cfg = config(dir.path());
+        cfg.limits.timeout = Duration::from_millis(200);
+        let (tx, _rx) = crate::stream::channel(1024);
+        let Err(err) = render(&cfg, &page, None, "p.lhtml", &request(), Some(tx)) else {
+            panic!("the render outlived its deadline");
+        };
+        assert!(matches!(err, RenderError::Timeout), "got {err:?}");
     }
 
     /// A state bakes in its config, so one built for a different server must

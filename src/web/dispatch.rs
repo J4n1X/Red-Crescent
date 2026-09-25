@@ -7,17 +7,40 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::Metadata;
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use actix_web::web;
+use futures_util::future::{Either, select};
 
 use crate::runtime::{RenderConfig, RenderError, RenderedResponse, RequestData, render};
+use crate::stream::{self, Head, Message, Receiver, Sender};
+
+/// `Err` is a render that panicked or never ran.
+pub(super) type Outcome = Result<Result<RenderedResponse, RenderError>, String>;
+
+/// Bytes a streamed response may have queued before `flush()` waits for the
+/// client.
+const STREAM_BUFFER: usize = 64 * 1024;
+
+pub(super) enum Dispatched {
+    Done(Outcome),
+    /// The template flushed: respond with `head` and `body` now; `render`
+    /// finishes the request and must be driven to completion.
+    Streaming {
+        head: Head,
+        body: Receiver,
+        render: Pin<Box<dyn Future<Output = Outcome>>>,
+    },
+}
 
 /// Renders `abs` inline or on the blocking pool, and records how it went.
-/// `Err` is a render that panicked or never ran.
+/// Only a pool render can stream: an inline one would wait on the worker that
+/// drains it.
 pub(super) async fn render_dispatched(
     cfg: &Arc<RenderConfig>,
     abs: PathBuf,
@@ -25,22 +48,67 @@ pub(super) async fn render_dispatched(
     display_name: String,
     request: RequestData,
     budget: Duration,
-) -> Result<Result<RenderedResponse, RenderError>, String> {
-    let outcome = if !budget.is_zero() && runs_inline(&abs) {
-        std::panic::catch_unwind(AssertUnwindSafe(|| {
-            timed_render(cfg, &abs, meta.as_ref(), &display_name, &request, budget)
+) -> Dispatched {
+    if !budget.is_zero() && runs_inline(&abs) {
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            timed_render(
+                cfg,
+                &abs,
+                meta.as_ref(),
+                &display_name,
+                &request,
+                budget,
+                None,
+            )
         }))
-        .map_err(|_| "render panicked".to_string())
-    } else {
-        let cfg = Arc::clone(cfg);
-        let path = abs.clone();
-        web::block(move || {
-            timed_render(&cfg, &path, meta.as_ref(), &display_name, &request, budget)
-        })
-        .await
-        .map_err(|e| e.to_string())
-    };
+        .map_err(|_| "render panicked".to_string());
+        return Dispatched::Done(recorded(abs, outcome, budget));
+    }
 
+    let (tx, mut rx) = stream::channel(STREAM_BUFFER);
+    let cfg = Arc::clone(cfg);
+    let path = abs.clone();
+    let task = web::block(move || {
+        timed_render(
+            &cfg,
+            &path,
+            meta.as_ref(),
+            &display_name,
+            &request,
+            budget,
+            Some(tx),
+        )
+    });
+    let mut render: Pin<Box<dyn Future<Output = Outcome>>> =
+        Box::pin(async move { recorded(abs, task.await.map_err(|e| e.to_string()), budget) });
+
+    // A head is always the first message. The sender is gone once the render
+    // is, so after completion the channel answers at once.
+    let first = {
+        let next = pin!(rx.next_message());
+        match select(next, render.as_mut()).await {
+            Either::Left((message, _)) => Either::Left(message),
+            Either::Right((outcome, _)) => Either::Right(outcome),
+        }
+    };
+    let (first, render) = match first {
+        Either::Left(message) => (message, render),
+        Either::Right(outcome) => (
+            rx.next_message().await,
+            Box::pin(std::future::ready(outcome)) as Pin<Box<dyn Future<Output = Outcome>>>,
+        ),
+    };
+    match first {
+        Some(Ok(Message::Head(head))) => Dispatched::Streaming {
+            head,
+            body: rx,
+            render,
+        },
+        _ => Dispatched::Done(render.await),
+    }
+}
+
+fn recorded(abs: PathBuf, outcome: Result<Timed, String>, budget: Duration) -> Outcome {
     if !budget.is_zero() {
         match &outcome {
             Ok(timed) => record_render(abs, timed.cost, timed.blocked, budget),
@@ -67,11 +135,12 @@ fn timed_render(
     display_name: &str,
     request: &RequestData,
     budget: Duration,
+    stream: Option<Sender>,
 ) -> Timed {
     crate::api::take_blocking();
     let started = Instant::now();
     let usage = (!budget.is_zero()).then(ThreadUsage::now);
-    let result = render(cfg, abs, meta, display_name, request);
+    let result = render(cfg, abs, meta, display_name, request, stream);
     let wall = started.elapsed();
     // Within budget by the wall clock is within it by any measure.
     let cost = match usage {

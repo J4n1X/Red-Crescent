@@ -39,6 +39,21 @@ Open design questions worth settling before writing code:
   be keyed by site.
 
 ### Streaming responses
+**Done 2026-09-25**, as designed below. `src/stream.rs` is the channel, bounded at 64 KiB; the
+pool path in `web/dispatch.rs` races its first message against the render. What the design
+left open:
+- **Inline renders cannot stream**, since a send would wait on the worker that drains it. There,
+  `flush()` still commits and seals the head, so the guards behave the same, and the body goes
+  out whole. `flush()` marks the render as blocking, which pins the template to the pool, so
+  this happens at most once per template.
+- **A client that disconnects** stops the template at its next `flush()` with the exit signal
+  rather than an error: nobody is left to show one to.
+- **After commit, `response` and `response.headers` are sealed** in `env_builder.lua`, so a late
+  write raises instead of disappearing; `set_cookie`, `redirect` and `send_file` check in Rust.
+- Streamed responses get `X-Accel-Buffering: no` unless the template set it.
+
+Original design:
+
 The rendered body is buffered whole and handed to actix in one piece
 (`builder.body(rendered.body)` in `src/web.rs`), so nothing a template produces reaches the client
 until it has finished. No server-sent events, no progress during a long operation, no generating a

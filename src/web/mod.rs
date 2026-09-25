@@ -96,7 +96,7 @@ pub async fn handler(
     let display_name = display_name(&data.serve_dir, &abs, &decoded_path);
     let request_data = build_request_data(&req, &decoded_path, content_type, body);
     let budget = Duration::from_micros(data.config.inline_render_budget_us);
-    let outcome = dispatch::render_dispatched(
+    let outcome = match dispatch::render_dispatched(
         &data.render_cfg,
         abs,
         meta,
@@ -104,7 +104,23 @@ pub async fn handler(
         request_data,
         budget,
     )
-    .await;
+    .await
+    {
+        dispatch::Dispatched::Done(outcome) => outcome,
+        dispatch::Dispatched::Streaming { head, body, render } => {
+            // The response goes out now; the render and the spool cleanup
+            // finish behind it, on this worker.
+            actix_web::rt::spawn(async move {
+                match render.await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => log::error!("{decoded_path}: after flush: {e}"),
+                    Err(e) => log::error!("render failed for {decoded_path}: {e}"),
+                }
+                body::remove_spooled(spooled).await;
+            });
+            return response::build_streaming(head, body);
+        }
+    };
 
     body::remove_spooled(spooled).await;
 

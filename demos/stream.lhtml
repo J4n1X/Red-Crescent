@@ -1,0 +1,28 @@
+<?lua
+    -- Output reaches the client at each flush() instead of all at the end.
+    -- Try: curl -N http://127.0.0.1:8080/stream.lhtml
+    local _, id = thread.spawn("stream-demo", "jobs/slow.lua")
+?><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Streaming</title>
+    <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<?lua include("partials/nav.lhtml") ?>
+<h1>Streaming</h1>
+<ol>
+<?lua
+    local tick = 0
+    while true do
+        local status, value = thread.join(id, 0.5)
+        tick = tick + 1
+?>    <li><?lua= string.format("%.1fs", tick * 0.5) ?>: <?lua= status == "running" and "still working" or (status .. ", " .. tostring(value)) ?></li>
+<?lua
+        flush()
+        if status ~= "running" then break end
+    end
+?></ol>
+</body>
+</html>
