@@ -1563,6 +1563,89 @@ async fn deleting_a_huge_folder_tree_finishes_and_spares_its_siblings() {
 }
 
 #[actix_web::test]
+async fn only_an_admin_deletes_users_and_their_files_go_too() {
+    let (app, data_dir) = app_with(drive_config()).await;
+    for name in ["admin", "bob"] {
+        post_form(
+            &app,
+            "/register.lhtml",
+            None,
+            format!("username={name}&password={name}pass123&password2={name}pass123"),
+        )
+        .await;
+    }
+    let db = rusqlite::Connection::open(data_dir.join("drive/drive.db")).unwrap();
+    db.execute("UPDATE users SET approved = 1", []).unwrap();
+    let id_of = |name: &str| -> i64 {
+        db.query_row("SELECT id FROM users WHERE username = ?1", [name], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+    let admin = login(&app, "admin", "adminpass123").await.expect("admin");
+    let bob = login(&app, "bob", "bobpass123").await.expect("bob");
+    let admin_csrf = csrf_of(&app, &admin).await;
+    let bob_csrf = csrf_of(&app, &bob).await;
+
+    let payload = multipart_body(
+        BOUNDARY,
+        &[
+            ("csrf", None, bob_csrf.as_bytes()),
+            ("action", None, b"upload"),
+            ("folder", None, b""),
+            ("file", Some("bob.txt"), b"bob's"),
+        ],
+    );
+    test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/actions.lhtml")
+            .insert_header((header::COOKIE, format!("session={bob}")))
+            .insert_header((
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            ))
+            .set_payload(payload)
+            .to_request(),
+    )
+    .await;
+    let files_dir = data_dir.join("drive/files");
+    assert_eq!(std::fs::read_dir(&files_dir).unwrap().count(), 1);
+
+    let delete = |session: String, csrf: String, id: i64| {
+        let app = &app;
+        async move {
+            location(
+                &post_form(
+                    app,
+                    "/actions.lhtml",
+                    Some(&session),
+                    format!("csrf={csrf}&action=delete_user&id={id}"),
+                )
+                .await,
+            )
+        }
+    };
+
+    let refused = delete(bob.clone(), bob_csrf, id_of("admin")).await;
+    assert!(refused.contains("Admins%20only"), "{refused}");
+    let own = delete(admin.clone(), admin_csrf.clone(), id_of("admin")).await;
+    assert!(own.contains("err="), "{own}");
+
+    let bob_id = id_of("bob");
+    let done = delete(admin.clone(), admin_csrf, bob_id).await;
+    assert!(done.contains("msg="), "{done}");
+    let users: i64 = db
+        .query_row("SELECT count(*) FROM users", [], |r| r.get(0))
+        .unwrap();
+    let files: i64 = db
+        .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!((users, files), (1, 0));
+    assert_eq!(std::fs::read_dir(&files_dir).unwrap().count(), 0);
+}
+
+#[actix_web::test]
 async fn folders_can_be_renamed_and_moved_but_never_into_themselves() {
     let (app, _data_dir) = app_with(drive_config()).await;
     post_form(

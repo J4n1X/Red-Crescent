@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use mlua::{HookTriggers, LuaSerdeExt, MultiValue, VmState};
+use mlua::{HookTriggers, Lua, LuaSerdeExt, MultiValue, Value, VmState};
 
 use crate::api;
 use crate::runtime::RenderConfig;
@@ -249,6 +249,101 @@ impl ThreadRegistry {
     }
 }
 
+/// The `thread` table: spawn, running, status, id, kill and join.
+pub(crate) fn register(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
+    let thread_table = lua.create_table()?;
+    let spawn_cfg = cfg.clone();
+    // spawn(name, script[, args]) -> spawned, id
+    //
+    // `args` travels as JSON: a Lua value belongs to the state that built it.
+    // When `spawned` is false the args are ignored — that run has its own.
+    thread_table.set(
+        "spawn",
+        lua.create_function(
+            move |lua, (name, script, args): (String, String, Option<Value>)| {
+                let args_json = match args {
+                    None | Some(Value::Nil) => None,
+                    Some(value) => {
+                        let json: serde_json::Value = lua.from_value(value)?;
+                        Some(serde_json::to_string(&json).map_err(mlua::Error::external)?)
+                    }
+                };
+                let (id, spawned) = spawn_named(spawn_cfg.clone(), &name, &script, args_json)
+                    .map_err(mlua::Error::runtime)?;
+                Ok((spawned, id as i64))
+            },
+        )?,
+    )?;
+    let registry = Arc::clone(&cfg.threads);
+    thread_table.set(
+        "running",
+        lua.create_function(move |_, name: String| Ok(registry.is_running(&name)))?,
+    )?;
+    // status(id) -> "running" | "finished" | "failed" | "cancelled" | nil
+    // Keyed by run id: a name may belong to a later run by the time you ask.
+    let registry = Arc::clone(&cfg.threads);
+    thread_table.set(
+        "status",
+        lua.create_function(move |_, id: i64| {
+            Ok(registry.status(id.max(0) as u64).map(RunStatus::as_str))
+        })?,
+    )?;
+    // id() -> the calling thread's run id, nil on a request thread.
+    thread_table.set(
+        "id",
+        lua.create_function(|_, ()| Ok(current_run_id().map(|id| id as i64)))?,
+    )?;
+    // kill(id) -> true if a stop was requested. Cooperative: raises a flag the
+    // target checks on its next hook firing or sleep slice, so a thread parked
+    // in os.execute will not notice until that call returns.
+    let registry = Arc::clone(&cfg.threads);
+    thread_table.set(
+        "kill",
+        lua.create_function(move |_, id: i64| Ok(registry.request_kill(id.max(0) as u64)))?,
+    )?;
+    // join(id[, seconds]) -> status, value
+    //
+    // Waits on a condvar. `value` is the return value when finished, the error
+    // when failed, nil while running. Capped: a join holds the worker and the
+    // timeout hook cannot fire inside it.
+    let registry = Arc::clone(&cfg.threads);
+    thread_table.set(
+        "join",
+        lua.create_function(move |lua, (id, seconds): (i64, Option<f64>)| {
+            let id = id.max(0) as u64;
+            if current_run_id() == Some(id) {
+                return Err(mlua::Error::runtime(
+                    "thread.join: a thread cannot join itself",
+                ));
+            }
+            let seconds = seconds.unwrap_or(DEFAULT_JOIN_SECS);
+            if !seconds.is_finite() || seconds < 0.0 {
+                return Err(mlua::Error::runtime(
+                    "thread.join: seconds must be zero or more",
+                ));
+            }
+            api::mark_blocking();
+            let waited = Duration::from_secs_f64(seconds.min(MAX_JOIN_SECS));
+            let Some((status, result, error)) = registry.join(id, waited) else {
+                return Ok((Value::Nil, Value::Nil));
+            };
+            let value = match (status, result, error) {
+                (RunStatus::Finished, Some(json), _) => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&json).map_err(mlua::Error::external)?;
+                    lua.to_value(&parsed)?
+                }
+                (RunStatus::Failed, _, Some(err)) => Value::String(lua.create_string(&err)?),
+                _ => Value::Nil,
+            };
+            Ok((Value::String(lua.create_string(status.as_str())?), value))
+        })?,
+    )?;
+    lua.globals().set("thread", thread_table.clone())?;
+    lua.register_module("thread", thread_table)?;
+    Ok(())
+}
+
 /// Resolve a thread script path: relative to the serve directory, must exist
 /// and be a `.lua` file.
 pub fn resolve_script(serve_dir: &Path, rel: &str) -> Result<PathBuf, String> {
@@ -261,10 +356,7 @@ pub fn resolve_script(serve_dir: &Path, rel: &str) -> Result<PathBuf, String> {
             "thread script '{rel}': escapes the serve directory"
         ));
     }
-    if !path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("lua"))
-    {
+    if !crate::resolve::has_extension(&path, "lua") {
         return Err(format!("thread script '{rel}': must be a .lua file"));
     }
     Ok(path)

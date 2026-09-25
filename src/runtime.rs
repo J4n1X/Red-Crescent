@@ -263,7 +263,8 @@ fn build_state(cfg: &RenderConfig) -> Result<(Lua, usize), RenderError> {
     // The watchdog signals this thread to arm it, and only on expiry.
     lua.set_app_data(crate::template::StateChunks::default());
     api::install_request_api(&lua, cfg).map_err(|e| RenderError::Lua(e.to_string()))?;
-    let address = api::state_address(&lua).map_err(|e| RenderError::Lua(e.to_string()))?;
+    let address =
+        crate::watchdog::state_address(&lua).map_err(|e| RenderError::Lua(e.to_string()))?;
     Ok((lua, address))
 }
 
@@ -392,9 +393,27 @@ fn render_on(
         }
     }
 
+    let (mut status, mut headers) = read_response(&env);
+
+    if let Some((url, redirect_status)) = state.redirect.borrow_mut().take() {
+        status = redirect_status;
+        headers.push(("Location".to_string(), url));
+    }
+
+    Ok(RenderedResponse {
+        body: state.out.take(),
+        status,
+        headers,
+        cookies: state.cookies.take(),
+        send_file: state.send_file.borrow_mut().take(),
+    })
+}
+
+/// Status and headers from the template's `response` table, skipping (and
+/// logging) values of the wrong type.
+fn read_response(env: &Table) -> (u16, Vec<(String, String)>) {
     let mut status: u16 = 200;
     let mut headers: Vec<(String, String)> = Vec::new();
-
     if let Ok(response_table) = env.get::<Table>("response") {
         match response_table.get::<Value>("status") {
             Ok(Value::Nil) => {}
@@ -424,19 +443,7 @@ fn render_on(
             }
         }
     }
-
-    if let Some((url, redirect_status)) = state.redirect.borrow_mut().take() {
-        status = redirect_status;
-        headers.push(("Location".to_string(), url));
-    }
-
-    Ok(RenderedResponse {
-        body: state.out.take(),
-        status,
-        headers,
-        cookies: state.cookies.take(),
-        send_file: state.send_file.borrow_mut().take(),
-    })
+    (status, headers)
 }
 
 /// Accept integers and numeric strings (PHP-style leniency) in the 100..=999

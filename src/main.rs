@@ -147,7 +147,6 @@ async fn main() -> std::io::Result<()> {
 
     let state = web::Data::new(AppState {
         serve_dir,
-        data_dir,
         spool_dir,
         fallback,
         render_cfg,

@@ -8,7 +8,7 @@
 //! authoritative.
 
 use std::fs::{File, Metadata};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub enum Resolved {
     Found(Found),
@@ -25,6 +25,35 @@ pub struct Found {
     /// The file itself, when `read` asked for it and resolving could open it
     /// on the way — the descriptor that was checked, not a second lookup.
     pub file: Option<File>,
+}
+
+pub fn has_extension(path: &Path, ext: &str) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+}
+
+pub fn is_lhtml(path: &Path) -> bool {
+    has_extension(path, "lhtml")
+}
+
+/// Whether `abs`, canonical, must never reach a client: Lua source, or a path
+/// with a hidden component below `serve_dir`. Outside `serve_dir` counts too.
+pub fn is_private(serve_dir: &Path, abs: &Path) -> bool {
+    if has_extension(abs, "lua") {
+        return true;
+    }
+    abs.strip_prefix(serve_dir).map_or(true, |rel| {
+        rel.components().any(|c| match c {
+            Component::Normal(name) => name.to_string_lossy().starts_with('.'),
+            _ => false,
+        })
+    })
+}
+
+/// `abs` relative to `serve_dir`, for logs and error messages.
+pub fn display_name(serve_dir: &Path, abs: &Path, fallback: &str) -> String {
+    abs.strip_prefix(serve_dir)
+        .map_or_else(|_| fallback.to_string(), |p| p.display().to_string())
 }
 
 /// Resolve `rel` under the canonical `root`; a directory to its `index` when

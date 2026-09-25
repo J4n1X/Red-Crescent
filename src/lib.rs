@@ -71,10 +71,7 @@ pub fn resolve_fallback(
             "fallback template '{rel}': escapes the serve directory"
         ));
     }
-    if !path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("lhtml"))
-    {
+    if !resolve::is_lhtml(&path) {
         return Err(format!("fallback template '{rel}': must be a .lhtml file"));
     }
     Ok(Some(path))

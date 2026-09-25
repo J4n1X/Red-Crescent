@@ -97,7 +97,6 @@ pub async fn app_with(
 
     let state = web::Data::new(AppState {
         serve_dir,
-        data_dir: data_dir.clone(),
         spool_dir,
         fallback,
         render_cfg,

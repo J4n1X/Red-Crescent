@@ -15,7 +15,6 @@
 //! for a trace to notice.
 
 use std::cell::Cell;
-#[cfg(unix)]
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -136,8 +135,9 @@ impl Drop for Deadline {
     }
 }
 
-/// Whether the calling hook should abort, recording that it did. Clones
-/// nothing and leaves no `Drop` value live: a raise longjmps.
+/// Whether the calling hook should abort, recording that it did. Stays true
+/// once set, so a script-level pcall delays the abort by at most one hook
+/// interval. Clones nothing and leaves no `Drop` value live: a raise longjmps.
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn should_abort() -> bool {
     MY_SLOT
@@ -169,10 +169,32 @@ extern "C" fn arm_hook(_sig: c_int) {
     unsafe {
         mlua::ffi::lua_sethook(
             state as *mut mlua::ffi::lua_State,
-            Some(crate::api::timeout_hook),
+            Some(timeout_hook),
             mlua::ffi::LUA_MASKCOUNT,
             1,
         );
+    }
+}
+
+/// Armed by the watchdog's signal handler; no hook is installed otherwise.
+/// Consults the slot before raising, so an arming that raced a finished
+/// request is a no-op rather than a killed innocent.
+///
+/// # Safety
+/// A `lua_Hook`, so it must not panic and must leave no Rust value with a
+/// `Drop` impl live across the raise: `lua_error` longjmps.
+#[cfg(unix)]
+unsafe extern "C-unwind" fn timeout_hook(
+    state: *mut mlua::lua_State,
+    _ar: *mut mlua::ffi::lua_Debug,
+) {
+    unsafe { mlua::ffi::lua_sethook(state, None, 0, 0) };
+    if !should_abort() {
+        return;
+    }
+    unsafe {
+        mlua::ffi::lua_pushliteral(state, c"execution time limit exceeded");
+        mlua::ffi::lua_error(state);
     }
 }
 
@@ -255,3 +277,24 @@ fn interrupt(slot: &Slot) {
 /// See `install_handler` above: nothing to poke with on Windows.
 #[cfg(windows)]
 fn interrupt(_slot: &Slot) {}
+
+thread_local! {
+    static CAPTURED_STATE: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Hands the running `lua_State` out to Rust. Calling a raw C function is the
+/// only place mlua surfaces the pointer.
+unsafe extern "C-unwind" fn capture_state(state: *mut mlua::lua_State) -> c_int {
+    let _ = CAPTURED_STATE.try_with(|c| c.set(state as usize));
+    0
+}
+
+/// Address of `lua`'s state, which the watchdog needs to interrupt a JIT
+/// backend. An address rather than a pointer so it can cross threads.
+pub(crate) fn state_address(lua: &mlua::Lua) -> mlua::Result<usize> {
+    // SAFETY: `capture_state` only stores its argument; it cannot panic and
+    // raises nothing.
+    let capture = unsafe { lua.create_c_function(capture_state)? };
+    capture.call::<()>(())?;
+    Ok(CAPTURED_STATE.try_with(|c| c.get()).unwrap_or(0))
+}
