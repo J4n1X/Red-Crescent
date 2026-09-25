@@ -95,8 +95,21 @@ const LOAD_SHIM: &str = r#"
 /// environment itself is fresh each time, from constructors sized in one go.
 const ENV_BUILDER: &str = include_str!("env_builder.lua");
 
+/// Every name a request environment defines from the globals, for plugins
+/// to be checked against.
+pub(crate) fn env_names() -> impl Iterator<Item = &'static str> {
+    ENV_TABLES.iter().chain(ENV_FUNCS).copied()
+}
+
 /// The builder source with its name lists and constructor fields filled in.
-fn env_builder_source() -> String {
+/// Plugin tables are copied per request like the built-in ones.
+fn env_builder_source(plugins: &[&str]) -> String {
+    let tables: Vec<&str> = ENV_TABLES
+        .iter()
+        .copied()
+        .chain(plugins.iter().copied())
+        .collect();
+    let tables = tables.as_slice();
     let quoted = |names: &[&str]| {
         names
             .iter()
@@ -111,11 +124,11 @@ fn env_builder_source() -> String {
             .map(|(i, n)| format!("{n} = {array}[{}], ", i + 1))
             .collect::<String>()
     };
-    let env = fields(ENV_TABLES, "copies") + &fields(ENV_FUNCS, "funcs");
+    let env = fields(tables, "copies") + &fields(ENV_FUNCS, "funcs");
     ENV_BUILDER
-        .replace("--[[TABLES]]", &quoted(ENV_TABLES))
+        .replace("--[[TABLES]]", &quoted(tables))
         .replace("--[[FUNCS]]", &quoted(ENV_FUNCS))
-        .replace("--[[LOADED]]", &fields(ENV_TABLES, "modules"))
+        .replace("--[[LOADED]]", &fields(tables, "modules"))
         .replace("--[[ENV]]", &env)
         .replace("--[[LOAD_SHIM]]", LOAD_SHIM)
 }
@@ -160,7 +173,11 @@ unsafe extern "C-unwind" fn lua_mark_finalizers(_state: *mut mlua::lua_State) ->
 
 /// Builds the builder from `shared`, the callbacks it closes over, and stores
 /// it with its reset in the registry.
-pub(super) fn install(lua: &Lua, shared: Table) -> mlua::Result<()> {
+pub(super) fn install(
+    lua: &Lua,
+    shared: Table,
+    plugins: &crate::plugins::Plugins,
+) -> mlua::Result<()> {
     // SAFETY: see `lua_unmodified`; only the builder holds it.
     shared.set("unmodified", unsafe {
         lua.create_c_function(lua_unmodified)?
@@ -171,24 +188,44 @@ pub(super) fn install(lua: &Lua, shared: Table) -> mlua::Result<()> {
     })?;
 
     let (builder, reset): (mlua::Function, mlua::Function) =
-        env_builder_factory(lua)?.call(shared)?;
+        env_builder_factory(lua, plugins)?.call(shared)?;
     lua.set_named_registry_value(ENV_BUILDER_KEY, builder)?;
     lua.set_named_registry_value(ENV_RESET_KEY, reset)
 }
 
 /// The chunk that builds the builder, from bytecode after the first state
 /// compiles it. Without this a non-pooled server reparses it every request,
-/// which measured 1.7x on `hello`.
-fn env_builder_factory(lua: &Lua) -> mlua::Result<mlua::Function> {
-    static DUMPED: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    if let Some(code) = DUMPED.get() {
-        return lua.load(code.as_slice()).into_function();
+/// which measured 1.7x on `hello`. Keyed by the plugin names, which the
+/// source bakes in; a server has one set, tests have several.
+fn env_builder_factory(
+    lua: &Lua,
+    plugins: &crate::plugins::Plugins,
+) -> mlua::Result<mlua::Function> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    type ByPlugins = HashMap<Vec<String>, Arc<[u8]>>;
+    static DUMPED: Mutex<Option<ByPlugins>> = Mutex::new(None);
+
+    let key: Vec<String> = plugins.names().map(str::to_string).collect();
+    let cached = DUMPED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .get(&key)
+        .cloned();
+    if let Some(code) = cached {
+        return lua.load(&*code).into_function();
     }
+    let names: Vec<&str> = key.iter().map(String::as_str).collect();
     let function = lua
-        .load(env_builder_source())
+        .load(env_builder_source(&names))
         .set_name("=rc:env")
         .into_function()?;
-    let _ = DUMPED.set(function.dump(false));
+    DUMPED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(key, function.dump(false).into());
     Ok(function)
 }
 

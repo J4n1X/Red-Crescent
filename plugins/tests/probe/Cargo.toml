@@ -1,0 +1,12 @@
+[package]
+name = "rc-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Exercises every part of the ABI for tests/plugins.rs; not an example.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+red-crescent-plugin = { path = "../../sdk" }

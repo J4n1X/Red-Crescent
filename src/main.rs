@@ -83,6 +83,9 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
+    let plugins = red_crescent::plugins::load(&config.plugins, &serve_dir, &data_dir)
+        .unwrap_or_else(|e| fatal(e));
+
     let render_cfg = Arc::new(RenderConfig {
         id: ConfigId::new(),
         serve_dir: serve_dir.clone(),
@@ -107,6 +110,7 @@ async fn main() -> std::io::Result<()> {
         },
         c_module_path: c_module_path.map(Arc::from),
         pool: config.lua_pool,
+        plugins,
         pool_max_requests: config.lua_pool_max_requests,
     });
 

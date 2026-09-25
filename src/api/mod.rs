@@ -20,7 +20,7 @@ use std::cell::Cell;
 
 use mlua::{Lua, LuaSerdeExt, MultiValue, Table, Value};
 
-pub(crate) use env::{build_request_env, reset_request_env};
+pub(crate) use env::{build_request_env, env_names, reset_request_env};
 pub use output::html_escape;
 
 use crate::runtime::{RenderConfig, RenderState};
@@ -52,6 +52,7 @@ impl RequestScope {
 
 impl Drop for RequestScope {
     fn drop(&mut self) {
+        crate::plugins::end_request();
         let _ = CURRENT_OUT.try_with(|c| c.set(self.out));
         let _ = CURRENT.try_with(|c| c.set(self.state));
     }
@@ -82,6 +83,7 @@ pub(crate) fn install_core(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
     fs_api::register(lua, &cfg.data_dir)?;
     crypto_api::register(lua)?;
     crate::threads::register(lua, cfg)?;
+    crate::plugins::install(lua, cfg.plugins)?;
     modules::install_package(lua, cfg)
 }
 
@@ -109,7 +111,12 @@ pub(crate) fn install_request_api(lua: &Lua, cfg: &RenderConfig) -> mlua::Result
     shared.set("flush", response::flush(lua)?)?;
 
     request::install(lua)?;
-    env::install(lua, shared)
+    env::install(lua, shared, cfg.plugins)
+}
+
+/// Writes into the page being rendered, for plugins' `host.write`.
+pub(crate) fn emit_output(bytes: &[u8]) -> mlua::Result<()> {
+    output::emit(bytes)
 }
 
 fn install_server(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {

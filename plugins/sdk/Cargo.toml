@@ -1,0 +1,7 @@
+[package]
+name = "red-crescent-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "Bindings for writing Red Crescent plugins; see ../ABI.md"
+
+[dependencies]

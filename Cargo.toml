@@ -19,6 +19,13 @@ luajit = ["mlua/luajit"]
 # modules unreachable rather than merely disabled.
 c-modules = []
 
+# Plugin crates live under plugins/ and build only when named (-p, --workspace),
+# so plain cargo build/test/clippy still means the server alone.
+[workspace]
+members = [".", "plugins/sdk", "plugins/examples/hostname", "plugins/tests/probe"]
+default-members = ["."]
+exclude = [".kilo"]
+
 [lib]
 name = "red_crescent"
 path = "src/lib.rs"
@@ -32,10 +39,12 @@ clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = "0.3"
 getrandom = "0.4"
 libc = "0.2"
+libloading = "0.9"
 log = "0.4.29"
 mlua = { version = "0.11.5", features = ["serde", "vendored"] }
 percent-encoding = "2"
 pretty_env_logger = "0.5.0"
+red-crescent-plugin = { path = "plugins/sdk" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.149"

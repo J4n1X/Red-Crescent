@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -48,6 +48,7 @@ pub fn test_config(serve_dir: &str) -> Config {
         lua_pool: true,
         lua_pool_max_requests: red_crescent::config::DEFAULT_LUA_POOL_MAX_REQUESTS,
         inline_render_budget_us: red_crescent::config::DEFAULT_INLINE_RENDER_BUDGET_US,
+        plugins: Default::default(),
     }
 }
 
@@ -63,8 +64,32 @@ pub async fn app_with(
         .expect("serve directory must exist");
     let (data_dir, spool_dir) =
         red_crescent::setup_data_dir(&config.data_dir, &serve_dir).expect("data dir setup");
+    let render_cfg = render_config(&config, &serve_dir, &data_dir);
 
-    let render_cfg = Arc::new(RenderConfig {
+    let fallback = red_crescent::resolve_fallback(config.fallback.as_deref(), &serve_dir)
+        .expect("fallback template");
+
+    let state = web::Data::new(AppState {
+        serve_dir,
+        spool_dir,
+        fallback,
+        render_cfg,
+        config,
+    });
+    let app = test::init_service(
+        App::new()
+            .app_data(state)
+            .default_service(web::route().to(handler)),
+    )
+    .await;
+    (app, data_dir)
+}
+
+/// The render config `app_with` serves with, for tests that render directly.
+pub fn render_config(config: &Config, serve_dir: &Path, data_dir: &Path) -> Arc<RenderConfig> {
+    let serve_dir = serve_dir.to_path_buf();
+    let data_dir = data_dir.to_path_buf();
+    Arc::new(RenderConfig {
         id: ConfigId::new(),
         serve_dir: serve_dir.clone(),
         data_dir: data_dir.clone(),
@@ -89,26 +114,10 @@ pub async fn app_with(
             .expect("c module directories")
             .map(Arc::from),
         pool: config.lua_pool,
+        plugins: red_crescent::plugins::load(&config.plugins, &serve_dir, &data_dir)
+            .expect("plugins"),
         pool_max_requests: config.lua_pool_max_requests,
-    });
-
-    let fallback = red_crescent::resolve_fallback(config.fallback.as_deref(), &serve_dir)
-        .expect("fallback template");
-
-    let state = web::Data::new(AppState {
-        serve_dir,
-        spool_dir,
-        fallback,
-        render_cfg,
-        config,
-    });
-    let app = test::init_service(
-        App::new()
-            .app_data(state)
-            .default_service(web::route().to(handler)),
-    )
-    .await;
-    (app, data_dir)
+    })
 }
 
 pub async fn body_string(resp: ServiceResponse) -> String {

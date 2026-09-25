@@ -4,6 +4,7 @@ pub mod crypto_api;
 pub mod fs_api;
 #[cfg(unix)]
 pub mod listen;
+pub mod plugins;
 pub mod process_api;
 pub mod resolve;
 pub mod runtime;

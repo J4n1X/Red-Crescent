@@ -1,0 +1,11 @@
+[package]
+name = "hostname"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]     # libhostname.so on Linux, hostname.dll on Windows
+
+[dependencies]
+gethostname = "1"
+red-crescent-plugin = { path = "../../sdk" }

@@ -9,12 +9,15 @@
 //! application can ship its own settings; `.lua` is never served, so it stays
 //! private.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
+
+use crate::plugins::PluginSetting;
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
 pub const DEFAULT_SERVE_DIR: &str = "./demos";
@@ -167,6 +170,11 @@ pub struct Settings {
     /// [default: 1000]
     #[arg(long, env = "RC_INLINE_RENDER_BUDGET_US")]
     pub inline_render_budget_us: Option<u64>,
+
+    /// Native plugins by Lua name; config file only. Relative paths are
+    /// resolved against the config file's directory when it is read.
+    #[arg(skip)]
+    pub plugins: BTreeMap<String, PluginSetting>,
 }
 
 impl Settings {
@@ -227,6 +235,7 @@ pub struct Config {
     pub lua_pool_max_requests: u32,
     /// Render time under which a template may run on the HTTP worker; 0 never.
     pub inline_render_budget_us: u64,
+    pub plugins: BTreeMap<String, PluginSetting>,
 }
 
 impl Default for Config {
@@ -303,6 +312,7 @@ impl Config {
                 file.inline_render_budget_us,
                 DEFAULT_INLINE_RENDER_BUDGET_US,
             ),
+            plugins: file.plugins,
         }
     }
 }
@@ -372,8 +382,16 @@ pub fn load_file_config(path: &Path) -> Result<Settings, String> {
 
     let value =
         integerize(&lua, Value::Table(table)).map_err(|e| format!("{}: {e}", path.display()))?;
-    lua.from_value(value)
-        .map_err(|e| format!("{}: {e}", path.display()))
+    let mut settings: Settings = lua
+        .from_value(value)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    for plugin in settings.plugins.values_mut() {
+        if plugin.path.is_relative() {
+            plugin.path = base.join(&plugin.path);
+        }
+    }
+    Ok(settings)
 }
 
 #[cfg(test)]

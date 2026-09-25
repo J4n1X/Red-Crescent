@@ -41,7 +41,7 @@ unsafe extern "C-unwind" fn lua_out(state: *mut mlua::lua_State) -> c_int {
 /// Where the output functions other than `_out` write: the same buffer the raw
 /// `_out` appends to, so ordering holds without coordination. Callers derive
 /// their bytes first, so nothing here can re-enter Lua and alias the buffer.
-fn emit(bytes: &[u8]) -> mlua::Result<()> {
+pub(super) fn emit(bytes: &[u8]) -> mlua::Result<()> {
     with_state(|st| {
         st.out.borrow_mut().extend_from_slice(bytes);
         Ok(())

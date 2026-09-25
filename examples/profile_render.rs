@@ -37,6 +37,7 @@ fn config(dir: &Path) -> RenderConfig {
         },
         c_module_path: None,
         pool: true,
+        plugins: red_crescent::plugins::Plugins::none(),
         pool_max_requests: 100_000_000,
     }
 }

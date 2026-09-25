@@ -81,6 +81,8 @@ pub struct RenderConfig {
     /// `new_lua` — and that pooling is off whatever `pool` says.
     pub c_module_path: Option<Arc<str>>,
     pub pool: bool,
+    /// Loaded native plugins, installed into every state. Never unloaded.
+    pub plugins: &'static crate::plugins::Plugins,
     /// Requests one pooled state serves before retirement, in the style of
     /// php-fpm's `pm.max_requests`. A backstop; the heap stays flat on its own.
     pub pool_max_requests: u32,
@@ -648,6 +650,7 @@ mod tests {
             },
             c_module_path: None,
             pool: true,
+            plugins: crate::plugins::Plugins::none(),
             pool_max_requests: 10_000,
         }
     }
