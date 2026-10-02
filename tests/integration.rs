@@ -828,6 +828,34 @@ async fn out_expr_renders_every_value_type() {
     );
 }
 
+/// Pins what `print` writes for every value type: unescaped, space-joined,
+/// and unlike `<?lua= ?>` it spells out nil.
+#[actix_web::test]
+async fn print_renders_every_value_type() {
+    let app = default_app().await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/print_types.lhtml")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bigint = if cfg!(feature = "luajit") {
+        "9007199254740992"
+    } else {
+        "9007199254740993"
+    };
+    assert_eq!(
+        body_string(resp).await,
+        format!(
+            "nil:[ nil ]\nbool:[ true false ]\nnum:[ 42 2.5 5 -0.125 {bigint} ]\n\
+             str:[ a<b>&'\"c ]\ntable:[ [1,2] ]\nfunc:[ <function> ]\nnone:[]\n\n"
+        )
+    );
+}
+
 #[cfg(unix)]
 async fn status_and_body<S>(app: &S, uri: &str) -> (StatusCode, String)
 where

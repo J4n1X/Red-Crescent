@@ -1,5 +1,5 @@
-//! Writing the page: the raw `_out` and `_out_expr` C functions, `_out_raw`,
-//! `print`, and HTML escaping.
+//! Writing the page: the raw `_out`, `_out_expr` and `print` C functions,
+//! `_out_raw`, and HTML escaping.
 
 use std::os::raw::c_int;
 
@@ -76,7 +76,6 @@ unsafe extern "C-unwind" fn lua_out_expr(state: *mut mlua::lua_State) -> c_int {
     if out.is_null() {
         return 0;
     }
-    use std::fmt::Write as _;
 
     let top = unsafe { mlua::ffi::lua_gettop(state) };
     for index in 1..=top {
@@ -102,24 +101,78 @@ unsafe extern "C-unwind" fn lua_out_expr(state: *mut mlua::lua_State) -> c_int {
                     escape_into(bytes, unsafe { &mut *out });
                 }
             }
-            // Formatted by Rust, not Lua: `tostring(5.0)` is "5.0" on 5.4 and
-            // "5" on LuaJIT, and a template must not see which backend it runs
-            // on. `lua_isinteger` classifies exactly as mlua's own conversion.
-            mlua::ffi::LUA_TNUMBER => {
-                let mut buf = StackBuf::new();
-                let written = if unsafe { mlua::ffi::lua_isinteger(state, index) } != 0 {
-                    write!(buf, "{}", unsafe { mlua::ffi::lua_tointeger(state, index) })
-                } else {
-                    write!(buf, "{}", unsafe { mlua::ffi::lua_tonumber(state, index) })
-                };
-                if written.is_ok() {
-                    unsafe { (*out).extend_from_slice(buf.as_bytes()) };
-                }
-            }
-            _ => unsafe { out_expr_slow(state, index) },
+            mlua::ffi::LUA_TNUMBER => unsafe { push_number(state, index, &mut *out) },
+            _ => unsafe { call_slow(state, OUT_EXPR_SLOW, index) },
         }
     }
     0
+}
+
+/// Registry key for the closure that renders what [`lua_print`] cannot.
+const PRINT_SLOW: &str = "rc_print_slow\0";
+
+/// `print`, raw like [`lua_out_expr`] but unescaped, space-joined, and nil is
+/// spelled out.
+///
+/// # Safety
+/// As `lua_out_expr`: only [`call_slow`] can raise, and nothing with a
+/// destructor is live across it.
+unsafe extern "C-unwind" fn lua_print(state: *mut mlua::lua_State) -> c_int {
+    let Ok(out) = CURRENT_OUT.try_with(|c| c.get()) else {
+        return 0;
+    };
+    if out.is_null() {
+        return 0;
+    }
+
+    let top = unsafe { mlua::ffi::lua_gettop(state) };
+    for index in 1..=top {
+        // SAFETY (every arm): as in `lua_out_expr`.
+        if index > 1 {
+            unsafe { (*out).push(b' ') };
+        }
+        match unsafe { mlua::ffi::lua_type(state, index) } {
+            mlua::ffi::LUA_TNIL => unsafe { (*out).extend_from_slice(b"nil") },
+            mlua::ffi::LUA_TBOOLEAN => {
+                let word: &[u8] = if unsafe { mlua::ffi::lua_toboolean(state, index) } != 0 {
+                    b"true"
+                } else {
+                    b"false"
+                };
+                unsafe { (*out).extend_from_slice(word) };
+            }
+            mlua::ffi::LUA_TSTRING => {
+                let mut len: usize = 0;
+                let ptr = unsafe { mlua::ffi::lua_tolstring(state, index, &mut len) };
+                if !ptr.is_null() {
+                    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+                    unsafe { (*out).extend_from_slice(bytes) };
+                }
+            }
+            mlua::ffi::LUA_TNUMBER => unsafe { push_number(state, index, &mut *out) },
+            _ => unsafe { call_slow(state, PRINT_SLOW, index) },
+        }
+    }
+    0
+}
+
+/// Formatted by Rust, not Lua: `tostring(5.0)` is "5.0" on 5.4 and "5" on
+/// LuaJIT, and a template must not see which backend it runs on.
+/// `lua_isinteger` classifies exactly as mlua's own conversion.
+///
+/// # Safety
+/// `index` must hold a number.
+unsafe fn push_number(state: *mut mlua::lua_State, index: c_int, out: &mut Vec<u8>) {
+    use std::fmt::Write as _;
+    let mut buf = StackBuf::new();
+    let written = if unsafe { mlua::ffi::lua_isinteger(state, index) } != 0 {
+        write!(buf, "{}", unsafe { mlua::ffi::lua_tointeger(state, index) })
+    } else {
+        write!(buf, "{}", unsafe { mlua::ffi::lua_tonumber(state, index) })
+    };
+    if written.is_ok() {
+        out.extend_from_slice(buf.as_bytes());
+    }
 }
 
 /// A `write!` target that cannot allocate or panic, so formatting a number
@@ -152,9 +205,10 @@ impl std::fmt::Write for StackBuf {
     }
 }
 
-/// Hands one value to the Lua closure under [`OUT_EXPR_SLOW`]. Skipped if that
-/// is missing, which means a state whose request API was never installed.
-unsafe fn out_expr_slow(state: *mut mlua::lua_State, index: c_int) {
+/// Hands one value to the Lua closure under `key`, a NUL-terminated registry
+/// key. Skipped if that is missing, which means a state whose request API was
+/// never installed.
+unsafe fn call_slow(state: *mut mlua::lua_State, key: &str, index: c_int) {
     unsafe {
         if mlua::ffi::lua_checkstack(state, 2) == 0 {
             return;
@@ -162,7 +216,7 @@ unsafe fn out_expr_slow(state: *mut mlua::lua_State, index: c_int) {
         mlua::ffi::lua_getfield(
             state,
             mlua::ffi::LUA_REGISTRYINDEX,
-            OUT_EXPR_SLOW.as_ptr() as *const std::os::raw::c_char,
+            key.as_ptr() as *const std::os::raw::c_char,
         );
         if mlua::ffi::lua_type(state, -1) != mlua::ffi::LUA_TFUNCTION {
             mlua::ffi::lua_pop(state, 1);
@@ -212,21 +266,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // Joins arguments with a space. Unescaped: it is how a template emits
     // markup it assembled itself.
-    globals.set(
-        "print",
-        lua.create_function(|lua, params: MultiValue| {
-            for (i, value) in params.into_iter().enumerate() {
-                if i > 0 {
-                    emit(b" ")?;
-                }
-                match value {
-                    Value::String(s) => emit(&s.as_bytes())?,
-                    other => emit(value_to_string(lua, other)?.as_bytes())?,
-                }
-            }
-            Ok(())
-        })?,
+    lua.set_named_registry_value(
+        &PRINT_SLOW[..PRINT_SLOW.len() - 1],
+        lua.create_function(|lua, value: Value| emit(value_to_string(lua, value)?.as_bytes()))?,
     )?;
+    // SAFETY: see `lua_print`. Same buffer and same thread-local as `_out`.
+    globals.set("print", unsafe { lua.create_c_function(lua_print)? })?;
 
     Ok(())
 }
