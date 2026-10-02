@@ -4,4 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "Bindings for writing Red Crescent plugins; see ../ABI.md"
 
+[features]
+# `#[plugin]`. The server only needs `ffi` and builds without it.
+default = ["macros"]
+macros = ["dep:red-crescent-plugin-macros"]
+
 [dependencies]
+log = "0.4"
+red-crescent-plugin-macros = { path = "macros", optional = true }
+serde = "1"
+serde_json = "1"

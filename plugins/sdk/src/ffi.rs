@@ -36,6 +36,8 @@ impl RcType {
     pub const RC_FUNCTION: RcType = RcType(6);
     pub const RC_HANDLE: RcType = RcType(7);
     pub const RC_OTHER: RcType = RcType(8);
+    /// The null sentinel: `sqlite.NULL`, `json.decode("null")`.
+    pub const RC_NULL: RcType = RcType(9);
 }
 
 /// A Lua table, function or other value, owned by Lua.
@@ -247,6 +249,12 @@ pub struct RcRegistryCOM {
         r#type: *const RcHandleType,
         type_id: *mut u32,
     ) -> RcStatus,
+    /// `name = value` in the plugin's table; scalars and strings, copied.
+    pub constant: unsafe extern "C" fn(
+        this: *mut RcRegistryCOM,
+        name_cstr: *const c_char,
+        value: *const RcValue,
+    ) -> RcStatus,
 }
 
 #[repr(C)]
@@ -325,6 +333,7 @@ int main(void) {{
     S(RcRegistryCOM) S(RcHost) S(RcStatus) S(RcType)
     O(RcValue, as) O(RcCall, internal) O(RcPluginContext, host)
     O(RcMethod, flags) O(RcHandleType, userdata) O(RcRegistryCOM, handle_type)
+    O(RcRegistryCOM, constant)
     O(RcHost, write) O(RcHost, call) O(RcHost, table_len) O(RcHost, log)
     return 0;
 }}"#
@@ -365,6 +374,10 @@ int main(void) {{
             (
                 "RcRegistryCOM.handle_type",
                 offset_of!(RcRegistryCOM, handle_type),
+            ),
+            (
+                "RcRegistryCOM.constant",
+                offset_of!(RcRegistryCOM, constant),
             ),
             ("RcHost.write", offset_of!(RcHost, write)),
             ("RcHost.call", offset_of!(RcHost, call)),

@@ -16,6 +16,7 @@ const ENV_RESET_KEY: &str = "rc_env_reset";
 /// Library tables each request gets a private copy of. Copying is what makes a
 /// reused state safe: a sandbox chaining to _G would let one request's
 /// `string.upper = f` reach the next.
+#[cfg(feature = "builtin-sqlite")]
 const ENV_TABLES: &[&str] = &[
     "string",
     "table",
@@ -27,6 +28,25 @@ const ENV_TABLES: &[&str] = &[
     "log",
     "json",
     "sqlite",
+    "crypto",
+    "fs",
+    "process",
+    "thread",
+    "server",
+];
+
+/// Without the built-in, `sqlite` is a plugin's to take.
+#[cfg(not(feature = "builtin-sqlite"))]
+const ENV_TABLES: &[&str] = &[
+    "string",
+    "table",
+    "math",
+    "os",
+    "io",
+    "coroutine",
+    "utf8",
+    "log",
+    "json",
     "crypto",
     "fs",
     "process",

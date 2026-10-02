@@ -24,7 +24,9 @@ pub(crate) use env::{build_request_env, env_names, reset_request_env};
 pub use output::html_escape;
 
 use crate::runtime::{RenderConfig, RenderState};
-use crate::{crypto_api, fs_api, process_api, sqlite_api};
+#[cfg(feature = "builtin-sqlite")]
+use crate::sqlite_api;
+use crate::{crypto_api, fs_api, process_api};
 
 thread_local! {
     /// Separate from `CURRENT` so the raw `_out` reaches the buffer in one load.
@@ -78,6 +80,7 @@ pub(crate) fn install_core(lua: &Lua, cfg: &RenderConfig) -> mlua::Result<()> {
     install_server(lua, cfg)?;
     install_log(lua)?;
     install_json(lua)?;
+    #[cfg(feature = "builtin-sqlite")]
     sqlite_api::register(lua, &cfg.data_dir, cfg.sqlite_idle_connections)?;
     process_api::register(lua)?;
     fs_api::register(lua, &cfg.data_dir)?;

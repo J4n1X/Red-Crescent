@@ -11,9 +11,10 @@ use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};
 
-use mlua::{Lua, Table};
+use mlua::Lua;
 use red_crescent_plugin::ffi::{
-    RC_PLUGIN_ABI, RcFunction, RcHandleType, RcPluginContext, RcRegistryCOM, RcStatus,
+    RC_PLUGIN_ABI, RcFunction, RcHandleType, RcPluginContext, RcRegistryCOM, RcStatus, RcType,
+    RcValue,
 };
 use serde::Deserialize;
 
@@ -41,6 +42,17 @@ pub struct Plugins {
 struct Plugin {
     name: String,
     functions: Vec<Function>,
+    constants: Vec<(String, Constant)>,
+}
+
+/// A value from `registry->constant`, copied out of the plugin.
+enum Constant {
+    Nil,
+    Null,
+    Boolean(bool),
+    Integer(i64),
+    Number(f64),
+    String(Vec<u8>),
 }
 
 pub(crate) struct Function {
@@ -50,6 +62,9 @@ pub(crate) struct Function {
     func: RcFunction,
     userdata: *mut c_void,
     flags: u32,
+    /// The plugin's handle types, as global ids: `first..first + len`. A
+    /// plugin numbers its own from 0, the same on every load.
+    types: (u32, u32),
 }
 
 struct HandleType {
@@ -224,9 +239,11 @@ fn load_one(
             size: size_of::<RcRegistryCOM>() as u32,
             function: register_function,
             handle_type: register_handle_type,
+            constant: register_constant,
         },
         plugin: name.to_string(),
         functions: Vec::new(),
+        constants: Vec::new(),
         handle_types: Vec::new(),
         first_type_id: plugins.handle_types.len() as u32,
         error: None,
@@ -242,6 +259,15 @@ fn load_one(
         return Err(format!("rc_plugin_install returned {}", status.0));
     }
 
+    let types = (registry.first_type_id, registry.handle_types.len() as u32);
+    let methods = registry
+        .handle_types
+        .iter_mut()
+        .flat_map(|t| t.methods.iter_mut());
+    for f in registry.functions.iter_mut().chain(methods) {
+        f.types = types;
+    }
+
     log::info!(
         "plugin '{name}' loaded from {}: {} function(s), {} handle type(s)",
         path.display(),
@@ -252,6 +278,7 @@ fn load_one(
     plugins.plugins.push(Plugin {
         name: name.to_string(),
         functions: registry.functions,
+        constants: registry.constants,
     });
     Ok(())
 }
@@ -263,10 +290,22 @@ struct Registry {
     com: RcRegistryCOM,
     plugin: String,
     functions: Vec<Function>,
+    constants: Vec<(String, Constant)>,
     handle_types: Vec<HandleType>,
     first_type_id: u32,
     /// The first misuse; install fails with it.
     error: Option<String>,
+}
+
+impl Registry {
+    fn unused(&self, name: String) -> Result<String, String> {
+        let taken = self.functions.iter().any(|f| f.name == name)
+            || self.constants.iter().any(|(n, _)| *n == name);
+        if taken {
+            return Err(format!("'{name}' is registered twice"));
+        }
+        Ok(name)
+    }
 }
 
 /// # Safety
@@ -297,6 +336,7 @@ fn function(
         func,
         userdata,
         flags,
+        types: (0, 0),
     }
 }
 
@@ -309,12 +349,7 @@ unsafe extern "C" fn register_function(
 ) -> RcStatus {
     // SAFETY: `this` is the `com` field of the Registry `load_one` handed out.
     let registry = unsafe { &mut *(this as *mut Registry) };
-    let result = unsafe { name_from(name) }.and_then(|name| {
-        if registry.functions.iter().any(|f| f.name == name) {
-            return Err(format!("'{name}' is registered twice"));
-        }
-        Ok(name)
-    });
+    let result = unsafe { name_from(name) }.and_then(|name| registry.unused(name));
     match result {
         Ok(name) => {
             let f = function(&registry.plugin, name, func, userdata, flags);
@@ -347,7 +382,7 @@ unsafe extern "C" fn register_handle_type(
             let owner = format!("{}:{name}", registry.plugin);
             methods.push(function(&owner, method, m.fn_, spec.userdata, m.flags));
         }
-        let id = registry.first_type_id + registry.handle_types.len() as u32;
+        let id = registry.handle_types.len() as u32;
         registry.handle_types.push(HandleType {
             name: Box::leak(format!("{}.{name}", registry.plugin).into_boxed_str()),
             methods,
@@ -358,6 +393,49 @@ unsafe extern "C" fn register_handle_type(
     })();
     match result {
         Ok(()) => RcStatus::RC_OK,
+        Err(e) => {
+            registry.error.get_or_insert(e);
+            RcStatus::RC_ERROR
+        }
+    }
+}
+
+unsafe extern "C" fn register_constant(
+    this: *mut RcRegistryCOM,
+    name: *const c_char,
+    value: *const RcValue,
+) -> RcStatus {
+    let registry = unsafe { &mut *(this as *mut Registry) };
+    let result = unsafe { name_from(name) }
+        .and_then(|name| registry.unused(name))
+        .and_then(|name| {
+            let value = unsafe { value.as_ref() }.ok_or("constant: null value")?;
+            // SAFETY (the union reads): each arm reads the member its tag names.
+            let constant = match value.r#type {
+                RcType::RC_NIL => Constant::Nil,
+                RcType::RC_NULL => Constant::Null,
+                RcType::RC_BOOL => Constant::Boolean(unsafe { value.as_.b } != 0),
+                RcType::RC_INT => Constant::Integer(unsafe { value.as_.i }),
+                RcType::RC_NUMBER => Constant::Number(unsafe { value.as_.n }),
+                RcType::RC_STRING => Constant::String(
+                    unsafe { value.as_bytes() }
+                        .ok_or("constant: a string with a null pointer")?
+                        .to_vec(),
+                ),
+                other => {
+                    return Err(format!(
+                        "constant '{name}': type {} is not a constant",
+                        other.0
+                    ));
+                }
+            };
+            Ok((name, constant))
+        });
+    match result {
+        Ok(entry) => {
+            registry.constants.push(entry);
+            RcStatus::RC_OK
+        }
         Err(e) => {
             registry.error.get_or_insert(e);
             RcStatus::RC_ERROR
@@ -376,21 +454,19 @@ pub(crate) fn install(lua: &Lua, plugins: &'static Plugins) -> mlua::Result<()> 
         for f in &plugin.functions {
             table.set(f.name.as_str(), host::wrap(lua, plugins, f)?)?;
         }
+        for (name, constant) in &plugin.constants {
+            let value = match constant {
+                Constant::Nil => mlua::Value::Nil,
+                Constant::Null => mlua::Value::NULL,
+                Constant::Boolean(b) => mlua::Value::Boolean(*b),
+                Constant::Integer(i) => mlua::Value::Integer(*i as _),
+                Constant::Number(n) => mlua::Value::Number(*n),
+                Constant::String(s) => mlua::Value::String(lua.create_string(s)?),
+            };
+            table.set(name.as_str(), value)?;
+        }
         lua.globals().set(plugin.name.as_str(), table.clone())?;
         lua.register_module(&plugin.name, table)?;
     }
     host::install(lua, plugins)
-}
-
-/// The per-type method tables, in type-id order.
-fn method_tables(lua: &Lua, plugins: &'static Plugins) -> mlua::Result<Table> {
-    let all = lua.create_table()?;
-    for (id, ty) in plugins.handle_types.iter().enumerate() {
-        let methods = lua.create_table()?;
-        for m in &ty.methods {
-            methods.set(m.name.as_str(), host::wrap(lua, plugins, m)?)?;
-        }
-        all.raw_set(id + 1, methods)?;
-    }
-    Ok(all)
 }

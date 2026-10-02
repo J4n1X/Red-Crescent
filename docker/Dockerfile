@@ -16,7 +16,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     cargo build --release --no-default-features \
-        --features "$LUA${FEATURES:+,$FEATURES}" \
+        --features "$LUA,builtin-sqlite${FEATURES:+,$FEATURES}" \
  && install -m755 target/release/Red-Crescent /usr/local/bin/Red-Crescent \
  && mkdir -p /out/plugins \
  && for p in $(echo "$PLUGINS" | tr ',' ' '); do \

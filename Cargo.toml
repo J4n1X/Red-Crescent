@@ -4,7 +4,11 @@ version = "0.2.0"
 edition = "2024"
 
 [features]
-default = ["lua54"]
+default = ["lua54", "builtin-sqlite"]
+
+# The `sqlite` module compiled in. Off, `sqlite` is free for the plugin in
+# plugins/examples/sqlite, which offers the same API.
+builtin-sqlite = ["dep:rusqlite"]
 
 # Which Lua the server embeds. Exactly one must be on. `lua54` is the default
 # and what the project targets; `luajit` exists so the JIT-specific output path
@@ -22,9 +26,8 @@ c-modules = []
 # Plugin crates live under plugins/ and build only when named (-p, --workspace),
 # so plain cargo build/test/clippy still means the server alone.
 [workspace]
-members = [".", "plugins/sdk", "plugins/examples/hostname", "plugins/tests/probe"]
+members = [".", "plugins/sdk", "plugins/sdk/macros", "plugins/examples/hostname", "plugins/examples/sqlite", "plugins/tests/probe"]
 default-members = ["."]
-exclude = [".kilo"]
 
 [lib]
 name = "red_crescent"
@@ -44,8 +47,8 @@ log = "0.4.29"
 mlua = { version = "0.11.5", features = ["serde", "vendored"] }
 percent-encoding = "2"
 pretty_env_logger = "0.5.0"
-red-crescent-plugin = { path = "plugins/sdk" }
-rusqlite = { version = "0.40", features = ["bundled"] }
+red-crescent-plugin = { path = "plugins/sdk", default-features = false }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.149"
 serde_urlencoded = "0.7"
@@ -54,6 +57,8 @@ tempfile = "3"
 
 [dev-dependencies]
 actix-http = "3"
+# Tests read app databases directly, with or without the built-in.
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Unix-only: pprof's unwinder is POSIX, and a dev-dependency is pulled in by any
 # example, so an unconditional one makes every example uncompilable for Windows.
@@ -74,3 +79,7 @@ codegen-units = 1
 strip = "debuginfo"
 opt-level = 3
 lto = true
+
+[[example]]
+name = "bench_plugin"
+required-features = ["builtin-sqlite"]

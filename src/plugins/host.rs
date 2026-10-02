@@ -7,12 +7,15 @@
 //! raised by the wrapper once the plugin has returned.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, c_int, c_void};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mlua::{AnyUserData, Lua, MetaMethod, MultiValue, Table, UserData, UserDataMethods, Value};
+use mlua::{
+    AnyUserData, Lua, MetaMethod, MultiValue, Table, UserData, UserDataFields, UserDataMethods,
+    Value,
+};
 use red_crescent_plugin::ffi::{
     RC_FN_BLOCKING, RcCall, RcHandleRef, RcHost, RcRef, RcStatus, RcType, RcValue, RcValueData,
 };
@@ -45,6 +48,8 @@ pub(crate) fn end_request() {
 struct CallState<'a> {
     lua: &'a Lua,
     plugins: &'static Plugins,
+    /// The calling plugin's handle types, as `Function::types`.
+    types: (u32, u32),
     serial: u64,
     /// Values references point at, and values whose string bytes a plugin
     /// was lent; both live until the call returns.
@@ -59,16 +64,32 @@ struct CallState<'a> {
 }
 
 impl<'a> CallState<'a> {
-    fn new(lua: &'a Lua, plugins: &'static Plugins) -> Self {
+    fn new(lua: &'a Lua, plugins: &'static Plugins, types: (u32, u32)) -> Self {
         CallState {
             lua,
             plugins,
+            types,
             serial: NEXT_SERIAL.fetch_add(1, Ordering::Relaxed),
             slots: Vec::new(),
             handles: Vec::new(),
             results: Vec::new(),
             message: None,
             error: None,
+        }
+    }
+
+    /// A global handle type id as the calling plugin numbers it, if it is one
+    /// of that plugin's.
+    fn local_type(&self, global: u32) -> Option<u32> {
+        let (first, len) = self.types;
+        (global >= first && global - first < len).then(|| global - first)
+    }
+
+    fn global_type(&self, local: u32) -> Result<u32, String> {
+        if local < self.types.1 {
+            Ok(self.types.0 + local)
+        } else {
+            Err(format!("unknown handle type {local}"))
         }
     }
 
@@ -115,13 +136,18 @@ impl<'a> CallState<'a> {
             Value::Function(_) => {
                 RcValue::reference(RcType::RC_FUNCTION, self.slot(value.clone())?)
             }
+            Value::LightUserData(l) if l.0.is_null() => RcValue {
+                r#type: RcType::RC_NULL,
+                as_: RcValueData { i: 0 },
+            },
             Value::UserData(ud) => match ud.borrow::<Handle>() {
-                Ok(h) => {
+                // Only the calling plugin's own: another's are opaque to it.
+                Ok(h) if self.local_type(h.type_id).is_some() => {
                     let v = RcValue {
                         r#type: RcType::RC_HANDLE,
                         as_: RcValueData {
                             handle: RcHandleRef {
-                                type_id: h.type_id,
+                                type_id: h.type_id - self.types.0,
                                 ptr: h.ptr,
                             },
                         },
@@ -130,7 +156,7 @@ impl<'a> CallState<'a> {
                     self.handles.push(ud.clone());
                     v
                 }
-                Err(_) => RcValue::reference(RcType::RC_OTHER, self.slot(value.clone())?),
+                _ => RcValue::reference(RcType::RC_OTHER, self.slot(value.clone())?),
             },
             other => RcValue::reference(RcType::RC_OTHER, self.slot(other.clone())?),
         })
@@ -140,6 +166,7 @@ impl<'a> CallState<'a> {
         // SAFETY (the union reads): each arm reads the member its tag names.
         Ok(match value.r#type {
             RcType::RC_NIL => Value::Nil,
+            RcType::RC_NULL => Value::NULL,
             RcType::RC_BOOL => Value::Boolean(unsafe { value.as_.b } != 0),
             RcType::RC_INT => Value::Integer(unsafe { value.as_.i } as _),
             RcType::RC_NUMBER => Value::Number(unsafe { value.as_.n }),
@@ -159,12 +186,13 @@ impl<'a> CallState<'a> {
             }
             RcType::RC_HANDLE => {
                 let h = unsafe { value.as_.handle };
+                let global = self.global_type(h.type_id)?;
                 let ud = self
                     .handles
                     .iter()
                     .find(|ud| {
                         ud.borrow::<Handle>()
-                            .is_ok_and(|x| x.type_id == h.type_id && x.ptr == h.ptr)
+                            .is_ok_and(|x| x.type_id == global && x.ptr == h.ptr)
                     })
                     .ok_or("a handle this call was not given")?;
                 Value::UserData(ud.clone())
@@ -202,14 +230,16 @@ impl Drop for Handle {
 }
 
 impl UserData for Handle {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_meta_method(MetaMethod::Index, |lua, this, key: Value| {
-            let all: Table = lua.named_registry_value(METHODS_KEY)?;
-            match all.raw_get::<Option<Table>>(this.type_id + 1)? {
-                Some(methods) => methods.raw_get::<Value>(key),
-                None => Ok(Value::Nil),
-            }
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // A plain table, not a function: `obj:name()` is then a table lookup
+        // rather than a call into Rust, which measured about half of what a
+        // method call cost on top of a built-in's.
+        fields.add_meta_field_with(MetaMethod::Index, |lua| {
+            lua.named_registry_value::<Table>(METHODS_KEY)
         });
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
             Ok(format!("{}: {:p}", this.name, this.ptr))
         });
@@ -279,19 +309,19 @@ unsafe extern "C" fn push(call: *mut RcCall, value: *const RcValue) -> RcStatus 
     })
 }
 
-unsafe extern "C" fn push_handle(call: *mut RcCall, type_id: u32, ptr: *mut c_void) -> RcStatus {
+unsafe extern "C" fn push_handle(call: *mut RcCall, local: u32, ptr: *mut c_void) -> RcStatus {
     guarded(call, |st| {
-        let ty = st
-            .plugins
-            .handle_types
-            .get(type_id as usize)
-            .ok_or_else(|| format!("unknown handle type {type_id}"))?;
+        let type_id = st.global_type(local)?;
+        let ty = &st.plugins.handle_types[type_id as usize];
+        // No destructor until Lua holds it: on failure the plugin still owns
+        // `ptr`, and dropping this must not free it behind the plugin's back.
         let ud = st.lua.create_userdata(Handle {
             type_id,
             ptr,
             name: ty.name,
-            destroy: ty.destroy,
+            destroy: None,
         })?;
+        ud.borrow_mut::<Handle>()?.destroy = ty.destroy;
         // Closes it at the end of the request rather than whenever the
         // collector gets to it; see `runtime::retain`.
         crate::api::mark_finalizers();
@@ -471,6 +501,47 @@ pub(super) static HOST: RcHost = RcHost {
     log,
 };
 
+/// `__index` for every handle. All handle types share one Rust type and so
+/// one metatable; a name more than one type has gets an entry that picks the
+/// method by the object's type.
+fn method_index(lua: &Lua, plugins: &'static Plugins) -> mlua::Result<Table> {
+    let mut by_name: BTreeMap<&'static str, Vec<(u32, &'static Function)>> = BTreeMap::new();
+    for (id, ty) in plugins.handle_types.iter().enumerate() {
+        for m in &ty.methods {
+            by_name
+                .entry(m.name.as_str())
+                .or_default()
+                .push((id as u32, m));
+        }
+    }
+    let index = lua.create_table()?;
+    for (name, impls) in by_name {
+        let f = match impls[..] {
+            [(_, only)] => wrap(lua, plugins, only)?,
+            _ => {
+                // `plugin:name`, from a method's `plugin:Type.name`.
+                let plugin = impls[0].1.qualified.split(':').next().unwrap_or_default();
+                let label = format!("{plugin}:{name}");
+                lua.create_function(move |lua, args: MultiValue| {
+                    let ty = match args.front() {
+                        Some(Value::UserData(ud)) => ud.borrow::<Handle>().ok().map(|h| h.type_id),
+                        _ => None,
+                    };
+                    match impls.iter().find(|(id, _)| Some(*id) == ty) {
+                        Some((_, f)) => invoke(lua, plugins, f, args),
+                        None => Err(mlua::Error::runtime(format!(
+                            "{label}: bad self (call methods with ':'), got {}",
+                            args.front().map_or("nil", Value::type_name)
+                        ))),
+                    }
+                })?
+            }
+        };
+        index.raw_set(name, f)?;
+    }
+    Ok(index)
+}
+
 /// The Lua function for `f`.
 pub(super) fn wrap(
     lua: &Lua,
@@ -489,7 +560,7 @@ fn invoke(
     if f.flags & RC_FN_BLOCKING != 0 {
         crate::api::mark_blocking();
     }
-    let mut st = CallState::new(lua, plugins);
+    let mut st = CallState::new(lua, plugins, f.types);
     let mut rc_args = Vec::with_capacity(args.len());
     for v in args.iter() {
         rc_args.push(st.rc_from(v, false).map_err(mlua::Error::runtime)?);
@@ -527,6 +598,6 @@ fn invoke(
 /// Per-state pieces the host functions look up: handle method tables and the
 /// real `next`, which a template's environment cannot replace.
 pub(super) fn install(lua: &Lua, plugins: &'static Plugins) -> mlua::Result<()> {
-    lua.set_named_registry_value(METHODS_KEY, super::method_tables(lua, plugins)?)?;
+    lua.set_named_registry_value(METHODS_KEY, method_index(lua, plugins)?)?;
     lua.set_named_registry_value(NEXT_KEY, lua.globals().raw_get::<mlua::Function>("next")?)
 }

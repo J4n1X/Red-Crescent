@@ -3,9 +3,11 @@
 Red Crescent must be expandable with plugins as an alternative to C modules. The reason for that is
 that such modules are loaded and ready globally, and under direct control of the server itself.
 
-**Status: prototype.** The server side is in `src/plugins/`, the header in `rc_plugin.h`, the Rust
-bindings in `sdk/`, and `tests/probe/` is the plugin `tests/plugins.rs` exercises. The safe SDK
-layer and its `plugin!` macro are not written yet. See "Cost" below for where the prototype stands.
+**Status: prototype.** The server side is in `src/plugins/`, the header in `rc_plugin.h`, and the
+Rust SDK with its `#[plugin]` macro in `sdk/`. `examples/sqlite/` is the built-in `sqlite` module
+rebuilt as a plugin, API for API, as the proof of concept; `tests/sqlite_plugin.rs` holds it to the
+built-in's own fixtures, and `examples/bench_plugin.rs` times the two against each other.
+`tests/probe/` is the plugin `tests/plugins.rs` exercises the whole ABI with. See "Cost" below.
 
 A plugin is a native library, `.so` on Linux and `.dll` on Windows, built for the platform it runs
 on and loaded by the server at startup. It talks to the server through a small C interface, even
@@ -47,8 +49,9 @@ typedef enum {
     RC_NIL, RC_BOOL, RC_INT, RC_NUMBER, RC_STRING,
     RC_TABLE,           /* reference */
     RC_FUNCTION,        /* reference */
-    RC_HANDLE,          /* an object of one of this plugin's handle types */
+    RC_HANDLE,          /* an object of one of this plugin's handle types; another's is RC_OTHER */
     RC_OTHER,           /* reference to anything else: a coroutine, a foreign userdata */
+    RC_NULL,            /* the null sentinel: sqlite.NULL, json.decode("null") */
 } RcType;
 
 /* A Lua table, function or other value, owned by Lua. Only usable through the host. */
@@ -127,8 +130,11 @@ struct RcRegistryCOM {
     /* name.fn: installs `fn` as a field of the plugin's table. */
     RcStatus (*function)(RcRegistryCOM *self, const char *name_cstr,
                          RcFunction fn, void *userdata, uint32_t flags);
-    /* Declares a handle type; *type_id is what push_handle takes. */
+    /* Declares a handle type; *type_id is what push_handle takes and RC_HANDLE carries:
+       0, 1, ... in registration order, the same on every load. */
     RcStatus (*handle_type)(RcRegistryCOM *self, const RcHandleType *type, uint32_t *type_id);
+    /* name = value in the plugin's table: nil, null, a boolean, number or string (copied). */
+    RcStatus (*constant)(RcRegistryCOM *self, const char *name_cstr, const RcValue *value);
 };
 ```
 
@@ -142,7 +148,7 @@ struct RcHost {
 
     /* Results and errors */
     RcStatus (*push)(RcCall *call, const RcValue *value);               /* append a return value */
-    RcStatus (*push_handle)(RcCall *call, uint32_t type_id, void *ptr); /* Lua now owns ptr */
+    RcStatus (*push_handle)(RcCall *call, uint32_t type_id, void *ptr); /* RC_OK: Lua owns ptr */
     RcStatus (*error)(RcCall *call, const char *msg, size_t len);       /* then return RC_ERROR */
 
     /* Output, into the page being rendered; unescaped, like print() */
@@ -177,7 +183,7 @@ A library must export two functions:
 /* Must exist for RC to load the plugin: the RC_PLUGIN_ABI it was built against. */
 uint32_t rc_plugin_abi(void);
 
-/* To install the plugin into the registry. Called once per process, at startup. */
+/* To install the plugin into the registry. Called at startup, once per server. */
 RcStatus rc_plugin_install(const RcPluginContext *ctx, RcRegistryCOM *reg);
 ```
 
@@ -185,10 +191,16 @@ RcStatus rc_plugin_install(const RcPluginContext *ctx, RcRegistryCOM *reg);
 a plugin *and* says which interface it expects, so a mismatch is refused at boot rather than
 crashing on the first call.
 
-`rc_plugin_install` only **records**: the names, function pointers, flags and handle types. It
-never sees a Lua state. The host builds the Lua wrappers from that record into every state it
-creates, including pooled states and background threads, so install cost is paid once, not per
-request.
+`rc_plugin_install` only **records**: the names, function pointers, flags, handle types and
+constants. It never sees a Lua state. The host builds the Lua wrappers from that record into every
+state it creates, including pooled states and background threads, so install cost is paid once,
+not per request.
+
+**One library can be installed more than once in a process**, each time with its own context: the
+operating system loads a library once, but every server in the process installs it, and the test
+suite runs many servers in one process. Globals are shared between those installs. State that
+belongs to an install, such as the data directory, goes in the `userdata` of the functions and
+handle types it registers, which is what `userdata` is for.
 
 ## Passing Lua values
 
@@ -237,15 +249,45 @@ local conn = pg.connect("postgres://…")   -- push_handle
 local rows = conn:query("SELECT 1")        -- a method from the handle type
 ```
 
+`push_handle` hands `ptr` to Lua only when it returns `RC_OK`; on failure the plugin still owns it.
 `destroy` runs when Lua collects the object. That can happen in a later request on the same thread
 or when a state is retired, so it must not call the host. Creating a handle flags the request for
 a full collection before its pooled state is reused, so a connection closes promptly rather than
 whenever the collector gets to it. **State that should outlive a request, such as a connection
 pool, belongs in the plugin's own globals, not in a handle.**
 
+All handles share one metatable, whose `__index` is a plain table of every method name of every
+handle type, so `obj:name()` costs a table lookup rather than a call into the host. A name that two
+types share picks its function by the object's type. The visible side effect: `obj.name` is a
+function, not nil, whenever any loaded handle type has a method of that name.
+
 ## Cost
 
-Measured on the prototype, release build, one request timing each operation in a loop:
+### SQLite, built-in against plugin
+
+The question this prototype had to answer: does a plugin make SQLite slower than the module
+compiled into the server? `examples/bench_plugin.rs` renders the same pages through both, on
+identical databases with the same connection reuse, in alternating rounds. Medians of three runs on
+one machine (absolute numbers do not carry between machines; the ratio is the result):
+
+| Page | Built-in | Plugin | Plugin / built-in |
+| --- | --- | --- | --- |
+| open, query 1 row | 76 µs | 80 µs | 1.04x |
+| query 100 rows | 324 µs | 352 µs | 1.09x |
+| query 1000 rows | 2345 µs | 2546 µs | 1.10x |
+| 100 `execute`, no parameters | 855 µs | 953 µs | 1.10x |
+| 100 `execute` with 2 parameters | 535 µs | 631 µs | 1.18x |
+
+SQLite's own work costs the same on both sides. The difference is crossing: about 1 µs per method
+call and about 0.25 µs per row returned (six host calls: a table and its fields). A typical page
+pays a few percent; a page that loops over hundreds of statements pays up to a fifth.
+
+The first measurement had `execute` at 1.4x. Half of that was the method lookup, then a host
+function per `obj:name`; it is now a table (see "Handles").
+
+### Where the rest goes
+
+Measured earlier on the probe, release build, one request timing each operation in a loop:
 
 | Operation | Plugin | Comparison |
 | --- | --- | --- |
@@ -256,22 +298,21 @@ Measured on the prototype, release build, one request timing each operation in a
 | Walking a table, per element | `probe.each(t, f)` 407 ns | Lua `pairs` loop 40 ns |
 | Reading a table, per element | `probe.sum(t)` 79 ns | Lua loop 10 ns |
 
-A bare call is cheaper than a built-in. Every value that crosses, and every host call, costs far
-more than it should. Profiled, that cost is the prototype's use of mlua's general-purpose API,
-not the ABI:
+A bare call is cheaper than a built-in. Every value that crosses, and every host call, costs more
+than it should. Profiled, on the probe and again on SQLite, that cost is the host's use of mlua's
+general-purpose API, not the ABI:
 
 - **Per call:** mlua's callback machinery, and `malloc`/`free` for the argument, result and
-  reference vectors (about 13% of an `echo`). Each value is also moved into mlua's reference store
-  and back.
-- **Per host call:** `table_next` fetches the real `next` from the registry by name every time,
-  which rebuilds the key string (`luaS_newlstr`), then calls it through a protected mlua call.
-  Every reference is cloned on use.
+  reference vectors. Each value is also moved into mlua's reference store and back
+  (`lua_xmove`, `lua_rotate`, `ValueRef::drop` in the profile).
+- **Per host call:** each table access is a protected mlua call, string keys are re-created
+  (`luaS_newlstr`), and every reference is cloned on use. `table_next` also fetches the real
+  `next` from the registry by name every time.
 
-The planned fix is the raw wrapper this document describes: a Lua C function that reads arguments
-off the stack into a stack-allocated array, references that are stack slots rather than cloned
-values, and host calls that use the Lua C API under one protected call each instead of mlua's
-reference store. Until then, plugins suit coarse calls (render this, query that) better than
-per-element traffic.
+The planned fix is a raw wrapper: a Lua C function that reads arguments off the stack into a
+stack-allocated array, references that are stack slots rather than cloned values, and host calls
+that use the Lua C API under one protected call each instead of mlua's reference store. Until
+then, plugins suit coarse calls (render this, query that) better than per-element traffic.
 
 ## Loading
 
@@ -285,7 +326,7 @@ plugins = {
 
 - **The key is the Lua name**: `hostname` becomes a table in every request's environment and is
   also reachable with `require("hostname")`. A key that clashes with a built-in (`json`, `sqlite`,
-  …) is refused at startup.
+  …) is refused at startup, which is why the SQLite plugin loads as `sqlite3` next to the built-in.
 - **`path` has no extension**, so one config works on every platform. The host tries the path as
   written, then `lib<name>.so` on Linux and `<name>.dll` on Windows in the same directory. Relative
   paths resolve from the config file's directory.
@@ -310,13 +351,33 @@ A plugin is native code in the server's process, so:
   its own `RcCall`, so plugin globals must be thread-safe. Handles and references never cross
   threads.
 - **Memory is not counted.** The per-request Lua memory limit sees only Lua allocations.
-- **A Rust plugin must not panic across the boundary.** A panic reaching an `extern "C"` function
-  aborts the process. Catch panics with `std::panic::catch_unwind` and return `RC_ERROR`.
+- **A panic must not cross the boundary.** A panic reaching an `extern "C"` function aborts the
+  process. The SDK catches them and raises a Lua error instead; hand-written entry points must
+  do the same.
+- **Two copies of one C library do not know about each other.** The SQLite plugin links its own
+  SQLite next to the server's. SQLite's POSIX locks are per process, so if both copies open the
+  same database file, one closing it drops locks the other relies on, which can corrupt the
+  database. A plugin replacing a built-in must not run beside it on the same files.
 
-## Example: a hostname plugin in Rust
+## Writing a plugin in Rust
 
-Two functions: `hostname.get()` returns the machine's name, and `hostname.print()` writes it
-straight into the page.
+The SDK's `#[plugin]` turns a module of ordinary Rust functions into a plugin. It generates both
+exports and a C entry point per function, converts arguments and results, turns `Err` and panics
+into Lua errors, and keeps install state per install. The rules are on `#[plugin]` in
+`sdk/macros/src/lib.rs`; in short:
+
+- `#[function]` makes a `fn` callable from Lua, `#[function(blocking)]` flags it, and
+  `#[function(raw)]` registers a hand-written `RcFunction` unchanged.
+- `#[install] fn(&Context) -> Result<State>` runs at install; a function taking `&State` gets it.
+- `#[constant] const NAME: ...` puts a string, number, boolean or `Value::Null` in the table.
+- `#[handle] impl Type { ... }` makes `Type` a Lua object with its `&self` methods. Returning a
+  `Type` hands it to Lua, and Lua drops it once collected.
+- A parameter `&Call` is the running call; every other parameter is a Lua argument, converted
+  with `FromLua`, and the return value with `IntoLua`. `&str`, numbers, `Option`, `Table`,
+  `Function`, `Value`, `Vec` and maps all convert; borrowed values live as long as the call.
+
+The hostname example, whole: `hostname.get()` returns the machine's name, and `hostname.print()`
+writes it straight into the page.
 
 ```toml
 # plugins/examples/hostname/Cargo.toml
@@ -330,57 +391,30 @@ crate-type = ["cdylib"]     # libhostname.so on Linux, hostname.dll on Windows
 
 [dependencies]
 gethostname = "1"
-red-crescent-plugin = { path = "../../sdk" }   # rc_plugin.h's types as #[repr(C)] Rust
+red-crescent-plugin = { path = "../../sdk" }
 ```
 
 ```rust
 // plugins/examples/hostname/src/lib.rs
-use std::ffi::c_void;
+use red_crescent_plugin::prelude::*;
 
-use red_crescent_plugin::ffi::*;
+#[plugin]
+mod hostname {
+    use super::*;
 
-#[unsafe(no_mangle)]
-pub extern "C" fn rc_plugin_abi() -> u32 {
-    RC_PLUGIN_ABI
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rc_plugin_install(
-    _ctx: *const RcPluginContext,
-    reg: *mut RcRegistryCOM,
-) -> RcStatus {
-    let r = unsafe { &*reg };
-    for (name, f) in [(c"get", get as RcFunction), (c"print", print as RcFunction)] {
-        let status = unsafe { (r.function)(reg, name.as_ptr(), f, std::ptr::null_mut(), 0) };
-        if status != RcStatus::RC_OK {
-            return status;
-        }
+    /// hostname.get() -> string
+    #[function]
+    fn get() -> String {
+        gethostname::gethostname().to_string_lossy().into_owned()
     }
-    RcStatus::RC_OK
-}
 
-fn hostname() -> String {
-    gethostname::gethostname().to_string_lossy().into_owned()
-}
-
-/// hostname.get() -> string
-unsafe extern "C" fn get(call: *mut RcCall, _userdata: *mut c_void) -> RcStatus {
-    let name = hostname();
-    let value = RcValue::string(&name);
-    unsafe { ((*(*call).host).push)(call, &value) }
-}
-
-/// hostname.print(): writes the name into the page, unescaped like print().
-unsafe extern "C" fn print(call: *mut RcCall, _userdata: *mut c_void) -> RcStatus {
-    let name = hostname();
-    unsafe { ((*(*call).host).write)(call, name.as_ptr().cast(), name.len()) }
+    /// hostname.print(): writes the name into the page, unescaped like print().
+    #[function]
+    fn print(call: &Call) -> Result<()> {
+        call.write(get())
+    }
 }
 ```
-
-`RcValue::string` is an SDK helper that borrows `name`, which is fine because `push` copies
-before it returns. In the SDK, `RcStatus` is a `#[repr(transparent)]` integer with associated
-constants, not a Rust `enum`: a value outside an enum's variants coming from C would be undefined
-behavior in Rust. Neither function can panic, so neither needs `catch_unwind`.
 
 Build it, name it in the config, and use it:
 
@@ -399,16 +433,10 @@ plugins = { hostname = { path = "/opt/red-crescent/plugins/hostname" } }
 <p>Served by <?lua hostname.print() ?></p>    <!-- raw -->
 ```
 
-The raw FFI above is what the ABI looks like. The SDK's safe layer would shrink the plugin to
-roughly this, with the macro generating both exports and wrapping each function in
-`catch_unwind`:
-
-```rust
-red_crescent_plugin::plugin! {
-    fn get(_call: &mut Call) -> Result<String> { Ok(hostname()) }
-    fn print(call: &mut Call) -> Result<()> { call.write(hostname().as_bytes()) }
-}
-```
+`examples/sqlite/src/lib.rs` shows the rest: install state from `options`, a handle type with
+methods, a constant, tables built row by row, and errors from `rusqlite` passed on with `?`. A
+plugin in C includes `rc_plugin.h` and exports the two functions itself; `sdk/src/ffi.rs` is that
+header as Rust, and a test compiles the header to check the two agree.
 
 ## Decisions
 

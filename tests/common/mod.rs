@@ -23,6 +23,48 @@ pub fn unique_data_dir() -> PathBuf {
     std::env::temp_dir().join(format!("rc-test-{}-{n}", std::process::id()))
 }
 
+/// Builds a plugin package from the workspace, once per test binary, and
+/// returns its path as rc_config.lua would name it. Its own target directory,
+/// so this never waits on the lock the running `cargo test` holds.
+pub fn plugin_path(package: &str) -> PathBuf {
+    static BUILT: std::sync::Mutex<Vec<(String, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+    let mut built = BUILT.lock().unwrap();
+    if let Some((_, path)) = built.iter().find(|(p, _)| p == package) {
+        return path.clone();
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = root.join("target/plugin-tests");
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["build", "--quiet", "-p", package, "--target-dir"])
+        .arg(&target)
+        .current_dir(&root)
+        .status()
+        .expect("cargo runs");
+    assert!(status.success(), "building the {package} plugin failed");
+    let path = target.join("debug").join(package.replace('-', "_"));
+    built.push((package.to_string(), path.clone()));
+    path
+}
+
+/// The config's plugins; without the built-in, plus the SQLite plugin as
+/// `sqlite`, so the whole suite runs against it.
+fn plugin_settings(
+    config: &Config,
+) -> std::collections::BTreeMap<String, red_crescent::plugins::PluginSetting> {
+    #[allow(unused_mut)]
+    let mut plugins = config.plugins.clone();
+    #[cfg(not(feature = "builtin-sqlite"))]
+    plugins
+        .entry("sqlite".to_string())
+        .or_insert_with(|| red_crescent::plugins::PluginSetting {
+            path: plugin_path("sqlite"),
+            options: Some(serde_json::json!({
+                "idle_connections": config.sqlite_idle_connections
+            })),
+        });
+    plugins
+}
+
 pub fn test_config(serve_dir: &str) -> Config {
     Config {
         bind: "127.0.0.1:0".to_string(),
@@ -114,7 +156,7 @@ pub fn render_config(config: &Config, serve_dir: &Path, data_dir: &Path) -> Arc<
             .expect("c module directories")
             .map(Arc::from),
         pool: config.lua_pool,
-        plugins: red_crescent::plugins::load(&config.plugins, &serve_dir, &data_dir)
+        plugins: red_crescent::plugins::load(&plugin_settings(config), &serve_dir, &data_dir)
             .expect("plugins"),
         pool_max_requests: config.lua_pool_max_requests,
     })

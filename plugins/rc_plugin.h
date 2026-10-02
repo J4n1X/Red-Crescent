@@ -30,8 +30,9 @@ typedef enum {
     RC_NIL, RC_BOOL, RC_INT, RC_NUMBER, RC_STRING,
     RC_TABLE,           /* reference */
     RC_FUNCTION,        /* reference */
-    RC_HANDLE,          /* an object of one of this plugin's handle types */
-    RC_OTHER            /* reference to anything else: a coroutine, a foreign userdata */
+    RC_HANDLE,          /* an object of one of this plugin's handle types; another's is RC_OTHER */
+    RC_OTHER,           /* reference to anything else: a coroutine, a foreign userdata */
+    RC_NULL             /* the null sentinel: sqlite.NULL, json.decode("null") */
 } RcType;
 
 /* A Lua table, function or other value, owned by Lua. Only usable through the host. */
@@ -96,8 +97,11 @@ struct RcRegistryCOM {
     /* name.fn: installs `fn` as a field of the plugin's table. */
     RcStatus (*function)(RcRegistryCOM *self, const char *name_cstr,
                          RcFunction fn, void *userdata, uint32_t flags);
-    /* Declares a handle type; *type_id is what push_handle takes. */
+    /* Declares a handle type; *type_id is what push_handle takes and RC_HANDLE carries:
+       0, 1, ... in registration order, the same on every load. */
     RcStatus (*handle_type)(RcRegistryCOM *self, const RcHandleType *type, uint32_t *type_id);
+    /* name = value in the plugin's table: nil, null, a boolean, number or string (copied). */
+    RcStatus (*constant)(RcRegistryCOM *self, const char *name_cstr, const RcValue *value);
 };
 
 struct RcHost {
@@ -105,7 +109,7 @@ struct RcHost {
 
     /* Results and errors */
     RcStatus (*push)(RcCall *call, const RcValue *value);               /* append a return value */
-    RcStatus (*push_handle)(RcCall *call, uint32_t type_id, void *ptr); /* Lua now owns ptr */
+    RcStatus (*push_handle)(RcCall *call, uint32_t type_id, void *ptr); /* RC_OK: Lua owns ptr */
     RcStatus (*error)(RcCall *call, const char *msg, size_t len);       /* then return RC_ERROR */
 
     /* Output, into the page being rendered; unescaped, like print() */

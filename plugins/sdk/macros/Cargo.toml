@@ -1,0 +1,13 @@
+[package]
+name = "red-crescent-plugin-macros"
+version = "0.1.0"
+edition = "2024"
+description = "#[plugin] for red-crescent-plugin; use it through that crate"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.80"
+quote = "1"
+syn = { version = "2", features = ["full"] }

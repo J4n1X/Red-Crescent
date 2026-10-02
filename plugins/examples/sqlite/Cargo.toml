@@ -1,0 +1,13 @@
+[package]
+name = "sqlite"
+version = "0.1.0"
+edition = "2024"
+
+# The built-in `sqlite` module as a plugin, API for API.
+[lib]
+crate-type = ["cdylib"]     # libsqlite.so on Linux, sqlite.dll on Windows
+
+[dependencies]
+red-crescent-plugin = { path = "../../sdk" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }

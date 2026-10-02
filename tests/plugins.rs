@@ -4,7 +4,6 @@
 mod common;
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 use actix_web::http::StatusCode;
 use actix_web::test as atest;
@@ -13,23 +12,8 @@ use common::{app_with, body_string, test_config};
 use red_crescent::plugins::PluginSetting;
 use red_crescent::runtime::{RequestBody, RequestData, render};
 
-/// Builds the probe once per test binary. Its own target directory, so this
-/// never waits on the lock the running `cargo test` holds.
 fn probe_path() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let target = root.join("target/plugin-tests");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "-p", "rc-probe", "--target-dir"])
-            .arg(&target)
-            .current_dir(&root)
-            .status()
-            .expect("cargo runs");
-        assert!(status.success(), "building the probe plugin failed");
-        target.join("debug/rc_probe")
-    })
-    .clone()
+    common::plugin_path("rc-probe")
 }
 
 fn serve_dir_with(pages: &[(&str, &str)]) -> tempfile::TempDir {
@@ -89,6 +73,34 @@ print(tostring(select(2, pcall(probe.bogus))))
     assert!(body.contains("probe.fail: boom"), "body: {body}");
     assert!(
         body.contains("probe.bogus: returned RC_PROPAGATE with no failed host call"),
+        "body: {body}"
+    );
+}
+
+#[actix_web::test]
+async fn the_sdk_names_bad_arguments_and_catches_panics() {
+    let body = render_page(
+        r#"<?lua
+local function err(f, ...)
+    return (tostring(select(2, pcall(f, ...))):match("^runtime error: ([^\n]*)"))
+end
+local c = probe.counter(1)
+print(table.concat({
+    err(probe.make, "x"), err(probe.make, 1.5), err(c.inc), err(c.get), err(probe.panic),
+}, "|"))
+?>"#,
+    )
+    .await;
+    let lines: Vec<&str> = body.split('|').collect();
+    assert_eq!(
+        lines,
+        [
+            "probe.make: argument 1: expected integer, got string",
+            "probe.make: argument 1: number has no integer representation",
+            "probe:Counter.inc: bad self (call methods with ':'): expected Counter, got nil",
+            "probe:get: bad self (call methods with ':'), got nil",
+            "probe.panic: panicked: on purpose",
+        ],
         "body: {body}"
     );
 }
@@ -157,6 +169,33 @@ async fn write_goes_into_the_page_unescaped() {
 async fn options_arrive_as_json_and_require_finds_the_table() {
     let body = render_page(r#"<?lua print(probe.options(), require("probe") == probe) ?>"#).await;
     assert_eq!(body, r#"{"greeting":"hi"} true"#);
+}
+
+/// One library, two installs in one process: each keeps its own state.
+#[actix_web::test]
+async fn each_install_keeps_its_own_state() {
+    let dir = serve_dir_with(&[("p.lhtml", "<?lua print(probe.options()) ?>")]);
+    let mut first = config_with_probe(&dir);
+    let mut second = config_with_probe(&dir);
+    for (config, n) in [(&mut first, 1), (&mut second, 2)] {
+        config.plugins.get_mut("probe").unwrap().options = Some(serde_json::json!({ "n": n }));
+    }
+    let (first, _) = app_with(first).await;
+    let (second, _) = app_with(second).await;
+    let get = || atest::TestRequest::get().uri("/p.lhtml").to_request();
+    let a = body_string(atest::call_service(&first, get()).await).await;
+    let b = body_string(atest::call_service(&second, get()).await).await;
+    assert_eq!((a.as_str(), b.as_str()), (r#"{"n":1}"#, r#"{"n":2}"#));
+}
+
+/// Two handle types share `get`; each object gets its own type's.
+#[actix_web::test]
+async fn a_shared_method_name_dispatches_by_type() {
+    let body = render_page(
+        r#"<?lua print(probe.counter(3):get(), probe.label("x"):get(), probe.counter(1).inc == nil) ?>"#,
+    )
+    .await;
+    assert_eq!(body, "3 x false");
 }
 
 #[actix_web::test]
