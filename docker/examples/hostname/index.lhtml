@@ -1,0 +1,3 @@
+<!doctype html>
+<title>Plugin in a container</title>
+<p>Served by <?lua= hostname.get() ?></p>

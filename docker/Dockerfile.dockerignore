@@ -1,0 +1,8 @@
+target
+data
+deploy
+.git
+.kilo
+docker
+*.md
+!README.md

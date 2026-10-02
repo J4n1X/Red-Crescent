@@ -1,0 +1,43 @@
+# Drive:   docker compose -f docker/compose.yaml up --build drive
+# Plugins: docker compose -f docker/compose.yaml up --build hostname
+
+# Native plugins run in the server's process, so the container is their
+# sandbox: no writable filesystem outside /data and /tmp, no capabilities.
+x-hardened: &hardened
+  read_only: true
+  tmpfs: /tmp
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+
+services:
+  drive:
+    <<: *hardened
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: red-crescent
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ../apps/drive:/app:ro
+      - drive-data:/data
+
+  hostname:
+    <<: *hardened
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PLUGINS: hostname
+    image: red-crescent:hostname
+    hostname: rc-plugin-demo
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - ./examples/hostname:/app:ro
+      - hostname-data:/data
+
+volumes:
+  drive-data:
+  hostname-data:
