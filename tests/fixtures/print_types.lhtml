@@ -1,0 +1,10 @@
+<?lua
+print("nil:[", nil, "]\n")
+print("bool:[", true, false, "]\n")
+print("num:[", 42, 10/4, 10/2, -0.125, 9007199254740993, "]\n")
+print("str:[", "a<b>&'\"c", "]\n")
+print("table:[", {1,2}, "]\n")
+print("func:[", print, "]\n")
+print()
+print("none:[]\n")
+?>
