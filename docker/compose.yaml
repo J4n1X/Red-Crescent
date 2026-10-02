@@ -1,0 +1,16 @@
+# Runs Drive: `docker compose -f docker/compose.yaml up --build`
+services:
+  drive:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: red-crescent
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ../apps/drive:/app:ro
+      - drive-data:/data
+    restart: unless-stopped
+
+volumes:
+  drive-data:
