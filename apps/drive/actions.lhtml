@@ -64,55 +64,15 @@
     local action = request.body.action or ""
 
     if action == "upload" then
-        local folder = current_folder()
-        local stored, failed = 0, {}
+        local stored, failed, quota_hit = filesm.store_batch(db, user, current_folder(), request.files)
+        if not stored then back("/", nil, failed) end
 
-        -- One transaction for the whole batch. Without it every file is its
-        -- own commit (an fsync each), which is what made a 4000-file folder
-        -- upload run past the execution limit and land half-stored. It also
-        -- makes the batch atomic: a failure leaves no half-built tree, only
-        -- unreferenced blobs that the cleanup thread collects.
-        local folder_cache = {}
-
-        -- Remaining quota for this batch, computed once and decremented per
-        -- stored file rather than re-summed for each of them.
-        local quota = filesm.quota(db, user)
-        local budget = quota and { remaining = quota - filesm.usage(db, user) } or nil
-        if budget and budget.remaining <= 0 then
-            back("/", nil, "Your storage quota is full. Delete something first.")
-        end
-
-        db:execute("BEGIN")
-        local ok, err = pcall(function()
-            for _, upload in ipairs(request.files) do
-                -- An unfilled file input still submits one empty part; skip it.
-                if upload.filename ~= "" or upload.size > 0 then
-                    local name, store_err =
-                        filesm.store_upload(db, user, folder, upload, folder_cache, budget)
-                    if name then
-                        stored = stored + 1
-                    else
-                        log.warn("drive: upload failed: " .. tostring(store_err))
-                        table.insert(failed, upload.filename)
-                    end
-                end
-            end
-        end)
-        if not ok then
-            db:execute("ROLLBACK")
-            log.error("drive: upload batch failed: " .. tostring(err))
-            back("/", nil, "The upload failed and was rolled back.")
-        end
-        db:execute("COMMIT")
-
-        if stored == 0 and #failed == 0 then back("/", nil, "No file was uploaded.") end
+        if #stored == 0 and #failed == 0 then back("/", nil, "No file was uploaded.") end
         if #failed > 0 then
-            local reason = (budget and budget.remaining <= 0)
-                and " (storage quota reached)" or ""
-            back("/", nil, "Stored " .. stored .. ", failed: "
-                .. table.concat(failed, ", ") .. reason)
+            back("/", nil, "Stored " .. #stored .. ", failed: "
+                .. table.concat(failed, ", ") .. (quota_hit and " (storage quota reached)" or ""))
         end
-        back("/", stored .. (stored == 1 and " file" or " files") .. " uploaded.")
+        back("/", #stored .. (#stored == 1 and " file" or " files") .. " uploaded.")
 
     elseif action == "mkdir" then
         local folder = current_folder()

@@ -1,0 +1,280 @@
+#!/bin/sh
+# drive-share: upload files to Drive and print share links.
+# Needs curl; zip or tar for directories. https://github.com/J4n1X/Red-Crescent
+set -eu
+
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/drive-share/config"
+
+usage() {
+    cat <<'EOF'
+Usage:
+  drive-share [options] FILE...        upload each file, print one share link per line
+  drive-share [options] -n NAME -      upload standard input as NAME
+  drive-share login [URL]              store the server address and an API token
+  drive-share whoami                   check the stored login
+  drive-share revoke LINK...           stop share links working
+  drive-share install-skill [DIR]      install the Claude Code skill (default ~/.claude/skills)
+
+Options:
+  -e, --expires TIME   link lifetime: 30m, 12h, 7d, 2w, or never (default 7d)
+  -f, --folder PATH    Drive folder to upload into, created if missing
+                       (default: the server's, usually "Shared"; "/" is the root)
+  -n, --name NAME      file name for standard input, or for a single file
+  -q, --quiet          no progress bar
+  -h, --help
+
+Directories are zipped (or tarred if zip is missing) and shared as one file.
+DRIVE_URL and DRIVE_TOKEN override the stored login.
+EOF
+}
+
+die() { printf 'drive-share: %s\n' "$*" >&2; exit 1; }
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/drive-share.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' INT TERM
+
+load_login() {
+    url=${DRIVE_URL:-}
+    token=${DRIVE_TOKEN:-}
+    if [ -f "$CONFIG_FILE" ]; then
+        [ -n "$url" ] || url=$(sed -n 's/^url=//p' "$CONFIG_FILE")
+        [ -n "$token" ] || token=$(sed -n 's/^token=//p' "$CONFIG_FILE")
+    fi
+    [ -n "$url" ] && [ -n "$token" ] || die "not logged in; run: drive-share login URL"
+    url=${url%/}
+    case $token in *[!A-Za-z0-9_]*) die "malformed token in $CONFIG_FILE" ;; esac
+    # Through a config file so the token stays out of the process list.
+    printf 'header = "Authorization: Bearer %s"\n' "$token" >"$tmp/auth"
+}
+
+# api ROUTE [curl args...]: sets $status and $body.
+api() {
+    route=$1
+    shift
+    status=$(curl "${progress:--s}" -S -K "$tmp/auth" -o "$tmp/body" -w '%{http_code}' "$@" "$url/api/$route") ||
+        die "could not reach $url"
+    body=$(cat "$tmp/body")
+}
+
+# First "key":"value" string in $body.
+field() {
+    printf '%s\n' "$body" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -n 1 | sed 's#\\/#/#g'
+}
+
+api_error() {
+    msg=$(field error)
+    die "${1:+$1: }${msg:-HTTP $status}"
+}
+
+# Escapes a value for a double-quoted curl -F parameter.
+fq() { printf '%s' "$1" | sed 's/[\\"]/\\&/g'; }
+
+seconds() {
+    case $1 in
+        0 | never | none) echo 0; return ;;
+    esac
+    n=${1%[smhdw]}
+    case $n in '' | *[!0-9]*) die "bad duration: $1 (try 30m, 12h, 7d, never)" ;; esac
+    case $1 in
+        *m) echo $((n * 60)) ;;
+        *h) echo $((n * 3600)) ;;
+        *d) echo $((n * 86400)) ;;
+        *w) echo $((n * 604800)) ;;
+        *) echo "$n" ;;
+    esac
+}
+
+cmd_login() {
+    url=${1:-${DRIVE_URL:-}}
+    if [ -z "$url" ]; then
+        printf 'Drive URL: ' >&2
+        read -r url
+    fi
+    url=${url%/}
+    case $url in http://* | https://*) ;; *) url="https://$url" ;; esac
+    if [ -t 0 ]; then
+        printf 'API token (create one at %s/tokens.lhtml): ' "$url" >&2
+        trap 'stty echo; exit 130' INT TERM
+        stty -echo
+        read -r token || true
+        stty echo
+        trap 'exit 130' INT TERM
+        echo >&2
+    else
+        read -r token || true
+    fi
+    [ -n "$token" ] || die "no token given"
+    DRIVE_URL=$url DRIVE_TOKEN=$token load_login
+    api whoami
+    [ "$status" = 200 ] || api_error "login failed"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    (umask 077 && printf 'url=%s\ntoken=%s\n' "$url" "$token" >"$CONFIG_FILE")
+    echo "Logged in to $url as $(field username)." >&2
+}
+
+cmd_whoami() {
+    load_login
+    api whoami
+    [ "$status" = 200 ] || api_error
+    echo "$(field username) @ $url"
+}
+
+cmd_revoke() {
+    [ $# -gt 0 ] || die "revoke needs a share link or token"
+    load_login
+    rc=0
+    for link in "$@"; do
+        api revoke --form-string "token=$link"
+        if [ "$status" = 200 ]; then
+            echo "revoked $(field revoked)" >&2
+        else
+            printf 'drive-share: %s: %s\n' "$link" "$(field error)" >&2
+            rc=1
+        fi
+    done
+    return $rc
+}
+
+progress=
+
+cmd_share() {
+    expires=$(seconds 7d)
+    folder=
+    has_folder=
+    name=
+    progress=
+    [ -t 2 ] && progress=--progress-bar
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -e | --expires) [ $# -ge 2 ] || die "$1 needs a value"; expires=$(seconds "$2"); shift 2 ;;
+            -f | --folder) [ $# -ge 2 ] || die "$1 needs a value"; folder=$2; has_folder=1; shift 2 ;;
+            -n | --name) [ $# -ge 2 ] || die "$1 needs a value"; name=$2; shift 2 ;;
+            -q | --quiet) progress=; shift ;;
+            -h | --help) usage; exit 0 ;;
+            --) shift; break ;;
+            -) break ;;
+            -*) die "unknown option $1 (see drive-share --help)" ;;
+            *) break ;;
+        esac
+    done
+    [ $# -gt 0 ] || { usage >&2; exit 2; }
+    load_login
+
+    # -n renames a regular file only when it is the sole input.
+    single=
+    [ $# -eq 1 ] && single=1
+    rc=0
+    for path in "$@"; do
+        if [ "$path" = - ]; then
+            [ -n "$name" ] || die "standard input needs a name: -n NAME"
+            part="file=@-;filename=\"$(fq "$name")\""
+        elif [ -d "$path" ]; then
+            dir=$(cd "$path" && pwd)
+            base=$(basename "$dir")
+            if command -v zip >/dev/null; then
+                archive="$tmp/$base.zip"
+                (cd "$dir/.." && zip -qry "$archive" "$base") || die "zip failed for $path"
+            else
+                archive="$tmp/$base.tar.gz"
+                tar -czf "$archive" -C "$dir/.." "$base" || die "tar failed for $path"
+            fi
+            part="file=@\"$(fq "$archive")\";filename=\"$(fq "$(basename "$archive")")\""
+        elif [ -f "$path" ] && [ -r "$path" ]; then
+            fname=$(basename "$path")
+            [ -n "$single" ] && [ -n "$name" ] && fname=$name
+            part="file=@\"$(fq "$path")\";filename=\"$(fq "$fname")\""
+        else
+            printf 'drive-share: %s: no such readable file\n' "$path" >&2
+            rc=1
+            continue
+        fi
+
+        set -- -F "$part" --form-string "expires=$expires"
+        [ -n "$has_folder" ] && set -- "$@" --form-string "folder=$folder"
+        api share "$@"
+        [ -d "$path" ] && rm -f "$archive"
+        if [ "$status" = 200 ]; then
+            field url
+        else
+            printf 'drive-share: %s: %s (HTTP %s)\n' "$path" "$(field error)" "$status" >&2
+            rc=1
+        fi
+    done
+    return $rc
+}
+
+cmd_install_skill() {
+    dest="${1:-$HOME/.claude/skills}/drive-share"
+    mkdir -p "$dest"
+    cat >"$dest/SKILL.md" <<'EOF'
+---
+name: drive-share
+description: Upload a file or directory to the user's Drive and get a share link, using the drive-share CLI. Use when the user asks to share, send, transfer, upload or "get a link for" a file, wants to move a file to another machine or person, or wants something Claude produced (a build, log, report, screenshot) handed over as a download link. Also revokes links.
+---
+
+# Sharing files with drive-share
+
+`drive-share` uploads files to the user's own Drive server and prints a public
+download link per file. Anyone holding the link can download the file until it
+expires or is revoked.
+
+## Sharing
+
+```bash
+drive-share path/to/file                 # link valid 7 days (default)
+drive-share -e 1h report.pdf             # 30m, 12h, 7d, 2w, or never
+drive-share a.log b.log                  # one link per line, in order
+drive-share some/directory               # zipped first, shared as one file
+some-command | drive-share -n out.txt -  # standard input, named
+drive-share -f Builds/2026 app.tar.gz    # into a Drive folder (default "Shared")
+```
+
+stdout carries only the links, one per input; progress and errors go to
+stderr. A non-zero exit means at least one input failed. Use `-q` to drop the
+progress bar.
+
+Give the user the link exactly as printed. Mention the expiry.
+
+## Before uploading
+
+- Only share what the user asked to share. The link is public to whoever has it.
+- If the file may hold secrets (`.env`, keys, credentials, tokens, a database
+  dump, a home directory), say so and confirm before uploading, and suggest a
+  short expiry.
+- To share something you generated, write it to a file with a sensible name
+  first, or pipe it with `-n NAME -`.
+- For a directory, check its size first (`du -sh`); exclude build output or
+  `node_modules` by copying what matters into a temp directory instead.
+
+## Revoking
+
+```bash
+drive-share revoke https://drive.example.com/s/abc123...   # or the bare token
+```
+
+The uploaded file itself stays in the user's Drive; revoking only kills the link.
+
+## When it fails
+
+- `command not found`: the CLI is not installed. The user's Drive shows install
+  steps on its **CLI** page (`/tokens.lhtml`).
+- `not logged in` or `missing or invalid API token`: the user must log in
+  themselves, since it asks for a secret token. Suggest they run
+  `! drive-share login https://their-drive` in the prompt, after creating a
+  token on the Drive's CLI page.
+- `storage quota` errors: tell the user; do not delete their files to make room.
+- `drive-share whoami` checks the login without uploading anything.
+EOF
+    echo "Installed the Claude Code skill to $dest/SKILL.md" >&2
+}
+
+case ${1:-} in
+    login) shift; cmd_login "$@" ;;
+    whoami) shift; cmd_whoami ;;
+    revoke) shift; cmd_revoke "$@" ;;
+    install-skill) shift; cmd_install_skill "$@" ;;
+    help | -h | --help) usage ;;
+    '') usage >&2; exit 2 ;;
+    *) cmd_share "$@" ;;
+esac

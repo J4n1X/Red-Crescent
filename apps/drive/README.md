@@ -40,6 +40,9 @@ want it running from boot rather than from the first request.
 | `app.lhtml` | Front controller for paths that are not files: routes `/s/<token>`, 404s the rest |
 | `s.lhtml` | **Public** share page: a single file, or a browsable shared folder, reached as `/s/<token>` |
 | `login/register/logout/admin.lhtml` | Auth flow and user management |
+| `tokens.lhtml` | API tokens for the command-line client, plus its install steps |
+| `api.lhtml` | JSON API at `/api/<route>`, bearer-token only |
+| `cli/drive-share` | The command-line client (POSIX sh + curl), served as a static file |
 | `config.lua` | App settings: share-link base URL, session lifetime, archive ceilings |
 | `rc_config.lua` | Server settings Red Crescent reads at startup |
 | `lib/*.lua` | `db` (schema + migrations), `auth` (sessions/CSRF), `files`, `shares`, `archive`, `util` |
@@ -85,6 +88,31 @@ capped at 2000 files / 512 MiB, bounded by `timeout(1)` when available, and the 
 archives land in `drive/tmp/` where the cleanup thread sweeps them — along with their
 `archive_jobs` rows, so a `ready` row can never outlive the file it points at.
 
+## Command line
+
+`cli/drive-share` uploads a file and prints a share link. The CLI page in the app
+(`/tokens.lhtml`) creates the API token and shows how to install the script from the
+server itself:
+
+```bash
+curl -fsSL --create-dirs https://drive.example.com/cli/drive-share -o ~/.local/bin/drive-share
+chmod +x ~/.local/bin/drive-share
+drive-share login https://drive.example.com   # asks for the token
+drive-share report.pdf                        # prints https://.../s/<token>, valid 7 days
+drive-share -e 1h -f Builds dist/             # directories are zipped first
+some-command | drive-share -n out.log -
+drive-share revoke https://.../s/<token>
+drive-share install-skill                     # Claude Code skill in ~/.claude/skills
+```
+
+Uploads go to the `api_folder` from `config.lua` unless `-f` names one. The API behind it:
+
+| Route | |
+|---|---|
+| `GET /api/whoami` | `{username, admin}` |
+| `POST /api/share` | multipart `file` parts, optional `folder` path and `expires` seconds; one share link per stored file |
+| `POST /api/revoke` | `token`, or a whole share URL |
+
 ## Security model
 
 - Passwords are argon2id hashes (`crypto.password_hash`).
@@ -105,6 +133,8 @@ archives land in `drive/tmp/` where the cleanup thread sweeps them — along wit
   archive — but the share root is a hard boundary: every folder and file id is verified to
   be inside it (`files.is_within`), so guessing a neighbouring id returns "not part of this
   share" rather than someone else's data.
+- API tokens are 256-bit, stored as sha256 and shown once. The API reads only the
+  `Authorization: Bearer` header, never the session cookie, so it needs no CSRF token.
 - All user-controlled strings are `html_escape`d before rendering.
 
 Known limitations (deliberate, documented): no login rate limiting; the session cookie's

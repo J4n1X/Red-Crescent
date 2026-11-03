@@ -5,6 +5,10 @@ return {
     -- cannot reach. Set it once there is a stable public address.
     share_base_url = "https://drive.eicher.cc",
 
+    -- Where the command-line client's uploads land unless it names a
+    -- folder. Created on first use; "" is the root.
+    api_folder = "Shared",
+
     -- How long a login stays valid.
     session_ttl = 7 * 24 * 3600,
 

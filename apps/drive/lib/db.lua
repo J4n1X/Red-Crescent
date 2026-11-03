@@ -123,6 +123,18 @@ local MIGRATIONS = {
         "CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id)",
         "CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id)",
     },
+    -- 7: API tokens for the command-line client. Stored hashed, like sessions.
+    {
+        [[CREATE TABLE IF NOT EXISTS api_tokens (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL,
+            last_used_at INTEGER
+        )]],
+        "CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id)",
+    },
 }
 
 function M.open()

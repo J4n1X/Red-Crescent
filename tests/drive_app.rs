@@ -1818,3 +1818,155 @@ async fn move_destinations_show_full_paths_and_exclude_own_subtree() {
         "offered its own descendant"
     );
 }
+
+async fn api_call<S>(app: &S, req: test::TestRequest, token: Option<&str>) -> (StatusCode, String)
+where
+    S: Service<actix_http::Request, Response = ServiceResponse, Error = actix_web::Error>,
+{
+    let req = match token {
+        Some(t) => req.insert_header((header::AUTHORIZATION, format!("Bearer {t}"))),
+        None => req,
+    };
+    let resp = test::call_service(app, req.to_request()).await;
+    (resp.status(), body_string(resp).await)
+}
+
+fn api_upload(parts: &[(&str, Option<&str>, &[u8])]) -> test::TestRequest {
+    test::TestRequest::post()
+        .uri("/api/share")
+        .insert_header((
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        ))
+        .set_payload(multipart_body(BOUNDARY, parts))
+}
+
+#[actix_web::test]
+async fn api_tokens_upload_share_and_revoke() {
+    let (app, _data_dir) = app_with(drive_config()).await;
+    post_form(
+        &app,
+        "/register.lhtml",
+        None,
+        "username=admin&password=adminpass1&password2=adminpass1".to_string(),
+    )
+    .await;
+    let admin = login(&app, "admin", "adminpass1").await.expect("session");
+    let csrf = csrf_of(&app, &admin).await;
+
+    // The token is shown once, in the response to the creating POST.
+    let page = body_string(
+        post_form(
+            &app,
+            "/tokens.lhtml",
+            Some(&admin),
+            format!("csrf={csrf}&action=create&name=laptop"),
+        )
+        .await,
+    )
+    .await;
+    let token = format!(
+        "drv_{}",
+        find_between(&page, "drv_", "<").expect("token on page")
+    );
+    let page = body_string(get(&app, "/tokens.lhtml", Some(&admin)).await).await;
+    assert!(page.contains("laptop"), "page: {page}");
+    assert!(!page.contains(&token), "token must not be shown again");
+
+    let (status, body) = api_call(
+        &app,
+        test::TestRequest::get().uri("/api/whoami"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"username\":\"admin\""), "{body}");
+
+    // A session cookie alone is no API credential: that would need CSRF.
+    let (status, _) = api_call(
+        &app,
+        api_upload(&[("file", Some("x.txt"), b"x")])
+            .insert_header((header::COOKIE, format!("session={admin}"))),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let content = b"shared from the command line";
+    let (status, body) = api_call(
+        &app,
+        api_upload(&[
+            ("expires", None, b"3600"),
+            ("file", Some("cli.txt"), content),
+        ]),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"name\":\"cli.txt\""), "{body}");
+    assert!(body.contains("\"expires_at\":"), "{body}");
+    let share = find_between(&body, "/s/", "\"")
+        .expect("share url")
+        .to_string();
+
+    // It landed in the configured folder, and the link serves its bytes.
+    let page = body_string(get(&app, "/", Some(&admin)).await).await;
+    assert!(page.contains(">Shared<"), "page: {page}");
+    let resp = get(&app, &format!("/s/{share}"), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = get(&app, &format!("/s/{share}?dl=1"), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(test::read_body(resp).await.as_ref(), content);
+
+    // An explicit folder path is created; "/" is the root.
+    let (status, _) = api_call(
+        &app,
+        api_upload(&[
+            ("folder", None, b"Builds/2026"),
+            ("file", Some("app.bin"), b"bin"),
+        ]),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let page = body_string(get(&app, "/", Some(&admin)).await).await;
+    assert!(page.contains(">Builds<"), "page: {page}");
+
+    let (status, body) = api_call(&app, api_upload(&[]), Some(&token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Revoking accepts the whole link.
+    let revoke = |link: String| {
+        test::TestRequest::post()
+            .uri("/api/revoke")
+            .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+            .set_payload(format!("token=https%3A%2F%2Fexample.com%2Fs%2F{link}"))
+    };
+    let (status, _) = api_call(&app, revoke(share.clone()), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        get(&app, &format!("/s/{share}"), None).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let (status, _) = api_call(&app, revoke(share.clone()), Some(&token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A revoked token stops working.
+    let page = body_string(get(&app, "/tokens.lhtml", Some(&admin)).await).await;
+    let after = &page[page.find("value=\"revoke\"").expect("revoke form")..];
+    let token_id = find_between(after, "name=\"id\" value=\"", "\"").expect("token id");
+    post_form(
+        &app,
+        "/tokens.lhtml",
+        Some(&admin),
+        format!("csrf={csrf}&action=revoke&id={token_id}"),
+    )
+    .await;
+    let (status, _) = api_call(
+        &app,
+        test::TestRequest::get().uri("/api/whoami"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

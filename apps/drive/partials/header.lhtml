@@ -16,6 +16,7 @@
     <nav>
         <?lua if current_user then ?>
             <a href="/shares.lhtml">Shares</a>
+            <a href="/tokens.lhtml">CLI</a>
             <?lua if current_user.is_admin == 1 then ?><a href="/admin.lhtml">Admin</a><?lua end ?>
             <span class="who"><?lua= current_user.username ?></span>
             <form method="post" action="/logout.lhtml" class="inline">

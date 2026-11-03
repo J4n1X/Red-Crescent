@@ -1,0 +1,95 @@
+<?lua
+    -- JSON API for the command-line client, reached as /api/<route> through
+    -- the front controller. Authenticated by bearer token only (lib/tokens.lua).
+    --   GET  /api/whoami
+    --   POST /api/share    multipart: file parts, optional folder, expires
+    --   POST /api/revoke   token (or a whole share URL)
+    local dbm = require("lib.db")
+    local tokens = require("lib.tokens")
+    local filesm = require("lib.files")
+    local sharesm = require("lib.shares")
+    local util = require("lib.util")
+    local config = require("config")
+
+    response.headers["Content-Type"] = "application/json"
+    response.headers["Cache-Control"] = "no-store"
+
+    local function reply(status, body)
+        response.status = status
+        print(json.encode(body))
+        exit()
+    end
+    local function fail(status, message) reply(status, { error = message }) end
+
+    local route = request.path:match("^/api/(%w+)/?$")
+    if not route then fail(404, "no such endpoint") end
+
+    local db = dbm.open()
+    local user = tokens.current_user(db)
+    if not user then
+        response.headers["WWW-Authenticate"] = 'Bearer realm="drive"'
+        fail(401, "missing or invalid API token")
+    end
+
+    local function need_method(method)
+        if request.method ~= method then
+            response.headers["Allow"] = method
+            fail(405, "use " .. method)
+        end
+    end
+
+    -- "a/b" below the root, created as needed; "" or "/" is the root.
+    local function resolve_folder(path)
+        local folder
+        for segment in path:gmatch("[^/]+") do
+            local sub, err = filesm.ensure_folder(db, user, folder, segment)
+            if not sub then fail(400, err or ("cannot create folder " .. segment)) end
+            folder = sub
+        end
+        return folder
+    end
+
+    if route == "whoami" then
+        need_method("GET")
+        reply(200, { username = user.username, admin = user.is_admin == 1 })
+
+    elseif route == "share" then
+        need_method("POST")
+        local expires = tonumber(request.body.expires)
+        if expires and expires <= 0 then expires = nil end
+        local folder = resolve_folder(request.body.folder or config.api_folder or "")
+
+        local base = util.base_url()
+        local shares = {}
+        -- On failure the second value is the message and the third its kind.
+        local stored, failed, quota_hit = filesm.store_batch(db, user, folder, request.files,
+            function(file)
+                local token = sharesm.create(db, user, "file", file, expires)
+                shares[#shares + 1] = {
+                    id = file.id, name = file.name, size = file.size,
+                    url = base .. "/s/" .. token,
+                    expires_at = expires and (os.time() + expires) or nil,
+                }
+            end)
+        if not stored then fail(quota_hit == "quota" and 507 or 500, failed) end
+        if #stored == 0 and #failed == 0 then fail(400, "no file in the request") end
+        if #stored == 0 then
+            fail(quota_hit and 507 or 400, "could not store: " .. table.concat(failed, ", "))
+        end
+
+        local body = { shares = shares }
+        if #failed > 0 then body.failed = failed end
+        reply(200, body)
+
+    elseif route == "revoke" then
+        need_method("POST")
+        local token = tostring(request.body.token or ""):match("(%w+)/?$")
+        if not token or not sharesm.revoke(db, user, token) then
+            fail(404, "no such share link")
+        end
+        reply(200, { revoked = token })
+
+    else
+        fail(404, "no such endpoint")
+    end
+?>

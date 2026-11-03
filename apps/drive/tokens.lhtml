@@ -1,0 +1,94 @@
+<?lua
+    -- API tokens for the drive-share command-line client. Handles its own
+    -- POSTs rather than going through actions.lhtml: a new token is shown
+    -- exactly once, and a redirect would have to carry it in the URL.
+    local dbm = require("lib.db")
+    local auth = require("lib.auth")
+    local tokens = require("lib.tokens")
+    local util = require("lib.util")
+
+    local db = dbm.open()
+    local user = auth.require_login(db)
+
+    local new_token
+    if request.method == "POST" then
+        auth.check_csrf(user)
+        if request.body.action == "create" then
+            local name = tostring(request.body.name or ""):sub(1, 64)
+            if name == "" then name = "unnamed" end
+            new_token = tokens.create(db, user, name)
+        elseif request.body.action == "revoke" then
+            tokens.revoke(db, user, request.body.id)
+            redirect("/tokens.lhtml?msg=" .. util.urlencode("Token revoked."))
+        end
+    end
+
+    local list = tokens.list(db, user)
+    local base = util.base_url()
+
+    page_title = "Command-line access"
+    current_user = user
+    csrf_html = auth.csrf_field(user)
+?>
+<?lua include("partials/header.lhtml") ?>
+
+<?lua== util.flash_html() ?>
+
+<h1>⌨️ Command-line access</h1>
+<p class="meta"><code>drive-share</code> uploads a file and prints a share link.
+    · <a href="/">back to files</a></p>
+
+<?lua if new_token then ?>
+<div class="panel">
+    <h2>Your new token</h2>
+    <p>Copy it now; it is not shown again.</p>
+    <span class="sharelink"><?lua= new_token ?></span>
+    <p class="meta">Then run:</p>
+    <span class="sharelink">drive-share login <?lua= base ?></span>
+</div>
+<?lua end ?>
+
+<div class="panel">
+    <h2>Install</h2>
+    <span class="sharelink">curl -fsSL --create-dirs <?lua= base ?>/cli/drive-share -o ~/.local/bin/drive-share &amp;&amp; chmod +x ~/.local/bin/drive-share</span>
+    <span class="sharelink">drive-share login <?lua= base ?></span>
+    <span class="sharelink">drive-share install-skill</span>
+    <p class="meta">Needs <code>curl</code>. The last line adds a Claude Code skill so Claude can
+        share files for you. Run <code>drive-share help</code> for everything else.</p>
+</div>
+
+<div class="panel">
+    <h2>Create a token</h2>
+    <form class="rowform" method="post" action="/tokens.lhtml">
+        <?lua== csrf_html ?>
+        <input type="hidden" name="action" value="create">
+        <input type="text" name="name" placeholder="Name, e.g. laptop" maxlength="64">
+        <button type="submit">Create token</button>
+    </form>
+    <p class="meta">A token can upload and share as you. Revoke it when a machine is gone.</p>
+</div>
+
+<?lua if #list > 0 then ?>
+<table class="listing">
+    <tr><th>Name</th><th>Created</th><th>Last used</th><th class="actions">Actions</th></tr>
+    <?lua for _, token in ipairs(list) do ?>
+        <tr>
+            <td><?lua= token.name ?></td>
+            <td class="meta"><?lua= util.format_time(token.created_at) ?></td>
+            <td class="meta"><?lua= token.last_used_at and util.format_time(token.last_used_at) or "never" ?></td>
+            <td class="actions">
+                <form class="inline" method="post" action="/tokens.lhtml"
+                      data-confirm="Revoke this token? Clients using it stop working.">
+                    <?lua== csrf_html ?>
+                    <input type="hidden" name="action" value="revoke">
+                    <input type="hidden" name="id" value="<?lua= token.id ?>">
+                    <button class="danger-icon" type="submit"
+                            title="Revoke" aria-label="Revoke">🗑</button>
+                </form>
+            </td>
+        </tr>
+    <?lua end ?>
+</table>
+<?lua end ?>
+
+<?lua include("partials/footer.lhtml") ?>

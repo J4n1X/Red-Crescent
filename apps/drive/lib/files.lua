@@ -241,7 +241,7 @@ end
 -- Stores one spooled upload. A relative path in the filename creates the
 -- virtual folder chain beneath `folder` first. The DB row is inserted
 -- *before* the rename so the cleanup job can never see an untracked stored
--- file. Returns the stored display name, or nil + error message.
+-- file. Returns the stored file row, or nil + error message.
 -- `budget` is an optional { remaining = bytes } table threaded through a
 -- batch: checking it here (rather than re-summing the files table for every
 -- file) keeps a 4000-file upload from doing 4000 aggregate queries.
@@ -265,15 +265,15 @@ function M.store_upload(db, user, folder, upload, cache, budget)
     local stored = crypto.random_token(16)
     local folder_id = folder and folder.id or sqlite.NULL
 
-    local final_name
+    local final_name, file_id
     for attempt = 1, 100 do
         local try = attempt == 1 and name or (name .. " (" .. attempt .. ")")
         if try_unique(function()
-            db:execute([[
+            file_id = db:execute([[
                 INSERT INTO files (owner_id, folder_id, name, stored_name, size, content_type, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ]], { user.id, folder_id, try, stored, upload.size,
-                  upload.content_type or sqlite.NULL, os.time() })
+                  upload.content_type or sqlite.NULL, os.time() }).last_insert_rowid
         end) then
             final_name = try
             break
@@ -291,7 +291,51 @@ function M.store_upload(db, user, folder, upload, cache, budget)
     if budget and budget.remaining then
         budget.remaining = budget.remaining - upload.size
     end
-    return final_name
+    return {
+        id = file_id, owner_id = user.id, folder_id = folder and folder.id or nil,
+        name = final_name, stored_name = stored, size = upload.size,
+    }
+end
+
+-- Stores a request's uploads under `folder` (nil = root) in one transaction.
+-- Per-file commits meant an fsync each, which made a 4000-file folder upload
+-- run past the execution limit and land half-stored; one transaction also
+-- makes the batch atomic, leaving only unreferenced blobs for the cleanup
+-- thread on failure. `on_stored(row)` runs inside the transaction.
+-- Returns the stored rows, the filenames that failed, and whether the quota
+-- ran out; or nil, message, and "quota" or "error".
+function M.store_batch(db, user, folder, uploads, on_stored)
+    -- Computed once and decremented per file, not re-summed for each.
+    local quota = M.quota(db, user)
+    local budget = quota and { remaining = quota - M.usage(db, user) } or nil
+    if budget and budget.remaining <= 0 then
+        return nil, "Your storage quota is full. Delete something first.", "quota"
+    end
+
+    local stored, failed, cache = {}, {}, {}
+    db:execute("BEGIN")
+    local ok, err = pcall(function()
+        for _, upload in ipairs(uploads) do
+            -- An unfilled file input still submits one empty part; skip it.
+            if upload.filename ~= "" or upload.size > 0 then
+                local row, store_err = M.store_upload(db, user, folder, upload, cache, budget)
+                if row then
+                    stored[#stored + 1] = row
+                    if on_stored then on_stored(row) end
+                else
+                    log.warn("drive: upload failed: " .. tostring(store_err))
+                    failed[#failed + 1] = upload.filename
+                end
+            end
+        end
+    end)
+    if not ok then
+        db:execute("ROLLBACK")
+        log.error("drive: upload batch failed: " .. tostring(err))
+        return nil, "The upload failed and was rolled back.", "error"
+    end
+    db:execute("COMMIT")
+    return stored, failed, budget ~= nil and budget.remaining <= 0
 end
 
 function M.delete_file(db, user, file)

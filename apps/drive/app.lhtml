@@ -3,9 +3,14 @@
     -- no file (`fallback` in rc_config.lua), so it routes what Drive owns by
     -- URL shape and answers everything else with a 404 in Drive's own chrome.
     --   /s/<token>            public share link
+    --   /api/<route>          JSON API for the command-line client
     share_token = request.path:match("^/s/(%w+)/?$")
     if share_token then
         include("s.lhtml")
+        exit()
+    end
+    if request.path:match("^/api/") then
+        include("api.lhtml")
         exit()
     end
 

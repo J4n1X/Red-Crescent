@@ -72,8 +72,10 @@ function M.lookup(db, token)
     return result
 end
 
+-- Returns true when a link was removed.
 function M.revoke(db, user, token)
-    db:execute("DELETE FROM shares WHERE token = ? AND created_by = ?", { token, user.id })
+    return db:execute("DELETE FROM shares WHERE token = ? AND created_by = ?",
+        { token, user.id }).changes > 0
 end
 
 function M.count_download(db, token)
