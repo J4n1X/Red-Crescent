@@ -1,5 +1,7 @@
 # Red Crescent
-
+<p align="center">
+  <img width="128" height="128" alt="red-crescent-logo-3" src="https://github.com/user-attachments/assets/9ce3122e-5f7e-48ab-baee-d3ed16347722" />
+</p>
 A web server that renders HTML with embedded Lua, written in Rust. Think PHP, but with Lua. It is
 meant to run behind nginx, Apache or Caddy, though it serves static files itself too.
 

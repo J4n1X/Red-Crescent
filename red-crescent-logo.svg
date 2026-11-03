@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Red Crescent</title>
+  <defs>
+    <path id="moon" d="M 82.78 -159.84 A 180 180 0 1 0 82.78 159.84 A 160 160 0 0 1 82.78 -159.84 Z"/>
+    <clipPath id="moonClip"><use href="#moon"/></clipPath>
+    <radialGradient id="body" gradientUnits="userSpaceOnUse" cx="-80" cy="-110" r="310">
+      <stop offset="0"    stop-color="#ff6a5c"/>
+      <stop offset="0.32" stop-color="#e81f2b"/>
+      <stop offset="0.68" stop-color="#a50e18"/>
+      <stop offset="1"    stop-color="#4f0208"/>
+    </radialGradient>
+    <radialGradient id="innerShade" gradientUnits="userSpaceOnUse" cx="90" cy="0" r="210">
+      <stop offset="0.76" stop-color="#3a0004" stop-opacity="0.55"/>
+      <stop offset="0.92" stop-color="#3a0004" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sheen" gradientUnits="userSpaceOnUse" x1="0" y1="-200" x2="0" y2="40">
+      <stop offset="0"   stop-color="#ffffff" stop-opacity="0.38"/>
+      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="1"   stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="hotspot" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0"   stop-color="#ffffff" stop-opacity="0.75"/>
+      <stop offset="0.45" stop-color="#ffe3de" stop-opacity="0.3"/>
+      <stop offset="1"   stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="streak" gradientUnits="userSpaceOnUse" x1="-145.5" y1="-84" x2="-14.6" y2="-167.4">
+      <stop offset="0"    stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="1"    stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="bounce" gradientUnits="userSpaceOnUse" x1="-149" y1="86" x2="-29.9" y2="169.4">
+      <stop offset="0"   stop-color="#ff9a8c" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#ffb3a6" stop-opacity="0.7"/>
+      <stop offset="1"   stop-color="#ff9a8c" stop-opacity="0"/>
+    </linearGradient>
+
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2.2"/>
+    </filter>
+  </defs>
+  <g transform="translate(260 252) rotate(-45)">
+    <use href="#moon" fill="url(#body)"/>
+
+    <g clip-path="url(#moonClip)">
+      <rect x="-200" y="-200" width="400" height="400" fill="url(#innerShade)"/>
+      <circle cx="-25" cy="-70" r="150" fill="url(#sheen)"/>
+      <ellipse cx="-92" cy="-118" rx="46" ry="24" transform="rotate(-38 -92 -118)" fill="url(#hotspot)"/>
+      <path d="M -145.5 -84 A 168 168 0 0 1 -14.6 -167.4" fill="none" stroke="url(#streak)"
+            stroke-width="7" stroke-linecap="round" filter="url(#soft)"/>
+      <path d="M -149 86 A 172 172 0 0 0 -29.9 169.4" fill="none" stroke="url(#bounce)"
+            stroke-width="6" stroke-linecap="round" filter="url(#soft)"/>
+    </g>
+    <use href="#moon" fill="none" stroke="#3d0005" stroke-opacity="0.5" stroke-width="1.5"/>
+  </g>
+</svg>
