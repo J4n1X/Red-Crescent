@@ -1,0 +1,1 @@
+<?lua local a = require("libs.chain_a") ?><?lua= a.value ?>

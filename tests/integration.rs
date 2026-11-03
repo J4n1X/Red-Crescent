@@ -511,6 +511,31 @@ async fn oversized_bodies_are_rejected() {
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
+/// Dev mode compiles a fresh chunk per load, and a freed one's address gets
+/// reused. The per-state chunk cache keyed on that address once handed a
+/// nested require its parent's function, looping until "loop or previous error".
+#[actix_web::test]
+async fn dev_mode_nested_requires_load_their_own_modules() {
+    let (app, _) = app_with(Config {
+        dev: true,
+        ..test_config()
+    })
+    .await;
+    for attempt in 0..20 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/require_chain.lhtml")
+                .to_request(),
+        )
+        .await;
+        let status = resp.status();
+        let body = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK, "attempt {attempt}: {body}");
+        assert!(body.contains("a+b"), "attempt {attempt}: {body}");
+    }
+}
+
 #[actix_web::test]
 async fn prod_error_pages_hide_details_dev_pages_show_them() {
     let app = default_app().await;

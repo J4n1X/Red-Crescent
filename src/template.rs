@@ -327,9 +327,11 @@ pub struct CompiledChunk {
 }
 
 /// Chunks this Lua state has already loaded, keyed by `CompiledChunk` identity.
-/// Lives in the state's app data so `include` and `require` share it.
+/// Lives in the state's app data so `include` and `require` share it. Each
+/// entry holds its `Arc` so the address cannot be freed and handed to another
+/// chunk while the key is in use.
 #[derive(Default)]
-pub(crate) struct StateChunks(std::cell::RefCell<HashMap<usize, Function>>);
+pub(crate) struct StateChunks(std::cell::RefCell<HashMap<usize, (Arc<CompiledChunk>, Function)>>);
 
 /// Entries kept per state before the cache is dropped wholesale.
 const MAX_STATE_CHUNKS: usize = 256;
@@ -375,8 +377,13 @@ impl TemplateCache {
         // new `Arc` and so a new key, and the stale function ages out below.
         let key = Arc::as_ptr(template) as usize;
 
+        // Dev mode compiles a fresh chunk per load, so nothing would ever hit.
+        if !self.enabled {
+            return self.chunk(lua, template, Some(env));
+        }
+
         if let Some(cache) = lua.app_data_ref::<StateChunks>() {
-            let hit = cache.0.borrow().get(&key).cloned();
+            let hit = cache.0.borrow().get(&key).map(|(_, f)| f.clone());
             if let Some(function) = hit {
                 function.set_environment(env.clone())?;
                 return Ok(function);
@@ -386,12 +393,12 @@ impl TemplateCache {
         let function = self.chunk(lua, template, Some(env))?;
         if let Some(cache) = lua.app_data_ref::<StateChunks>() {
             let mut map = cache.0.borrow_mut();
-            // Bounded so a dev-mode edit loop cannot grow it without limit; a
+            // Bounded so a long run of edits cannot grow it without limit; a
             // site has far fewer templates than this.
             if map.len() >= MAX_STATE_CHUNKS {
                 map.clear();
             }
-            map.insert(key, function.clone());
+            map.insert(key, (Arc::clone(template), function.clone()));
         }
         Ok(function)
     }
