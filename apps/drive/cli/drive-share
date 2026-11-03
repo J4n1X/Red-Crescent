@@ -13,6 +13,8 @@ Usage:
   drive-share login [URL]              store the server address and an API token
   drive-share whoami                   check the stored login
   drive-share revoke LINK...           stop share links working
+  drive-share delete LINK|PATH...      delete a shared file, or the file at a Drive
+                                       path like Shared/report.pdf, with its links
   drive-share install-skill [DIR]      install the Claude Code skill (default ~/.claude/skills)
 
 Options:
@@ -136,6 +138,26 @@ cmd_revoke() {
     return $rc
 }
 
+cmd_delete() {
+    [ $# -gt 0 ] || die "delete needs a share link or a Drive path"
+    load_login
+    rc=0
+    for target in "$@"; do
+        # A link, or a bare 32-hex token; anything else is a Drive path.
+        key=path
+        case $target in */s/*) key=token ;; esac
+        printf '%s\n' "$target" | grep -qx '[0-9a-f]\{32\}' && key=token
+        api delete --form-string "$key=$target"
+        if [ "$status" = 200 ]; then
+            echo "deleted $(field deleted)" >&2
+        else
+            printf 'drive-share: %s: %s\n' "$target" "$(field error)" >&2
+            rc=1
+        fi
+    done
+    return $rc
+}
+
 progress=
 
 cmd_share() {
@@ -210,7 +232,7 @@ cmd_install_skill() {
     cat >"$dest/SKILL.md" <<'EOF'
 ---
 name: drive-share
-description: Upload a file or directory to the user's Drive and get a share link, using the drive-share CLI. Use when the user asks to share, send, transfer, upload or "get a link for" a file, wants to move a file to another machine or person, or wants something Claude produced (a build, log, report, screenshot) handed over as a download link. Also revokes links.
+description: Upload a file or directory to the user's Drive and get a share link, using the drive-share CLI. Use when the user asks to share, send, transfer, upload or "get a link for" a file, wants to move a file to another machine or person, or wants something Claude produced (a build, log, report, screenshot) handed over as a download link. Also revokes links and deletes shared files.
 ---
 
 # Sharing files with drive-share
@@ -255,6 +277,17 @@ drive-share revoke https://drive.example.com/s/abc123...   # or the bare token
 
 The uploaded file itself stays in the user's Drive; revoking only kills the link.
 
+## Deleting
+
+```bash
+drive-share delete https://drive.example.com/s/abc123...   # the file behind a link
+drive-share delete Shared/report.pdf                       # or by Drive path
+```
+
+Deletion is permanent and takes every link to the file with it. Delete only
+what the user asked to delete; for anything you did not upload yourself in this
+conversation, confirm first. Folders cannot be deleted from the CLI.
+
 ## When it fails
 
 - `command not found`: the CLI is not installed. The user's Drive shows install
@@ -273,6 +306,7 @@ case ${1:-} in
     login) shift; cmd_login "$@" ;;
     whoami) shift; cmd_whoami ;;
     revoke) shift; cmd_revoke "$@" ;;
+    delete) shift; cmd_delete "$@" ;;
     install-skill) shift; cmd_install_skill "$@" ;;
     help | -h | --help) usage ;;
     '') usage >&2; exit 2 ;;

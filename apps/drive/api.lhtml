@@ -4,6 +4,7 @@
     --   GET  /api/whoami
     --   POST /api/share    multipart: file parts, optional folder, expires
     --   POST /api/revoke   token (or a whole share URL)
+    --   POST /api/delete   token of a file share, or path of a file
     local dbm = require("lib.db")
     local tokens = require("lib.tokens")
     local filesm = require("lib.files")
@@ -88,6 +89,28 @@
             fail(404, "no such share link")
         end
         reply(200, { revoked = token })
+
+    elseif route == "delete" then
+        need_method("POST")
+        local file
+        if request.body.path and request.body.path ~= "" then
+            file = filesm.file_at(db, user, request.body.path)
+        else
+            -- Expired links count: the file outlives them.
+            local token = tostring(request.body.token or ""):match("(%w+)/?$")
+            local share = token and db:query(
+                "SELECT file_id FROM shares WHERE token = ? AND created_by = ?",
+                { token, user.id })[1]
+            if not share then fail(404, "no such share link") end
+            if not share.file_id then
+                fail(400, "that link shares a folder; delete folders in the web UI")
+            end
+            file = filesm.get_file(db, user, share.file_id)
+        end
+        if not file then fail(404, "no such file") end
+        -- Its share links go with it (ON DELETE CASCADE).
+        filesm.delete_file(db, user, file)
+        reply(200, { deleted = file.name })
 
     else
         fail(404, "no such endpoint")

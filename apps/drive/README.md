@@ -102,6 +102,7 @@ drive-share report.pdf                        # prints https://.../s/<token>, va
 drive-share -e 1h -f Builds dist/             # directories are zipped first
 some-command | drive-share -n out.log -
 drive-share revoke https://.../s/<token>
+drive-share delete https://.../s/<token>      # or a Drive path: Shared/report.pdf
 drive-share install-skill                     # Claude Code skill in ~/.claude/skills
 ```
 
@@ -112,6 +113,7 @@ Uploads go to the `api_folder` from `config.lua` unless `-f` names one. The API 
 | `GET /api/whoami` | `{username, admin}` |
 | `POST /api/share` | multipart `file` parts, optional `folder` path and `expires` seconds; one share link per stored file |
 | `POST /api/revoke` | `token`, or a whole share URL |
+| `POST /api/delete` | `token` of a file share, or `path` of a file; deletes it and its links |
 
 ## Security model
 

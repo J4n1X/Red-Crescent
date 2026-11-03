@@ -1843,7 +1843,7 @@ fn api_upload(parts: &[(&str, Option<&str>, &[u8])]) -> test::TestRequest {
 
 #[actix_web::test]
 async fn api_tokens_upload_share_and_revoke() {
-    let (app, _data_dir) = app_with(drive_config()).await;
+    let (app, data_dir) = app_with(drive_config()).await;
     post_form(
         &app,
         "/register.lhtml",
@@ -1934,6 +1934,54 @@ async fn api_tokens_upload_share_and_revoke() {
 
     let (status, body) = api_call(&app, api_upload(&[]), Some(&token)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let delete = |field: &str, value: &str| {
+        test::TestRequest::post()
+            .uri("/api/delete")
+            .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+            .set_payload(format!("{field}={value}"))
+    };
+
+    // Delete by Drive path; a second attempt finds nothing.
+    let (status, body) = api_call(&app, delete("path", "Builds/2026/app.bin"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = api_call(&app, delete("path", "Builds/2026/app.bin"), Some(&token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Delete by link takes the file and its link with it.
+    let (_, body) = api_call(
+        &app,
+        api_upload(&[("file", Some("doomed.txt"), b"bye")]),
+        Some(&token),
+    )
+    .await;
+    let doomed = find_between(&body, "/s/", "\"")
+        .expect("share url")
+        .to_string();
+    let (status, body) = api_call(
+        &app,
+        delete(
+            "token",
+            &format!("https%3A%2F%2Fexample.com%2Fs%2F{doomed}"),
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("doomed.txt"), "{body}");
+    assert_eq!(
+        get(&app, &format!("/s/{doomed}"), None).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let conn = rusqlite::Connection::open(data_dir.join("drive/drive.db")).unwrap();
+    let left: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE name = 'doomed.txt'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0, "file row survived the delete");
 
     // Revoking accepts the whole link.
     let revoke = |link: String| {

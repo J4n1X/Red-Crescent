@@ -199,6 +199,26 @@ local function select_folder(db, user, parent_id, name)
         { user.id, name })[1]
 end
 
+-- The file at "a/b/name" below the root, or nil. Creates nothing.
+function M.file_at(db, user, path)
+    local segments = {}
+    for segment in tostring(path or ""):gmatch("[^/]+") do segments[#segments + 1] = segment end
+    local name = table.remove(segments)
+    if not name then return nil end
+    local parent_id
+    for _, segment in ipairs(segments) do
+        local folder = select_folder(db, user, parent_id, segment)
+        if not folder then return nil end
+        parent_id = folder.id
+    end
+    if parent_id then
+        return db:query("SELECT * FROM files WHERE owner_id = ? AND folder_id = ? AND name = ?",
+            { user.id, parent_id, name })[1]
+    end
+    return db:query("SELECT * FROM files WHERE owner_id = ? AND folder_id IS NULL AND name = ?",
+        { user.id, name })[1]
+end
+
 -- Get-or-create a folder under `parent` (nil = root). Safe against the
 -- concurrent-create race: on a UNIQUE conflict it re-selects the winner.
 -- `cache` is optional; a bulk upload passes one so that a deep tree costs a
